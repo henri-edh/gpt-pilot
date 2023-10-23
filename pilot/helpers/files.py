@@ -1,4 +1,4 @@
-from termcolor import colored
+from utils.style import color_green
 import os
 
 
@@ -11,7 +11,7 @@ def update_file(path, new_content):
     # Write content to the file
     with open(path, 'w') as file:
         file.write(new_content)
-        print(colored(f"Updated file {path}", "green"))
+        print(color_green(f"Updated file {path}"))
 
 def get_files_content(directory, ignore=[]):
     return_array = []
@@ -21,6 +21,7 @@ def get_files_content(directory, ignore=[]):
         dirs[:] = [d for d in dirs if d not in ignore]
 
         for file in files:
+            # TODO: avoid sharing `.env` etc
             if file in ignore:
                 continue
 
@@ -29,7 +30,7 @@ def get_files_content(directory, ignore=[]):
                 file_content = f.read()
 
             file_name = os.path.basename(path)
-            relative_path = path.replace(directory, '').replace('/' + file_name, '')
+            relative_path = path.replace(directory, '').replace('\\', '/').replace('/' + file_name, '')
             return_array.append({
                 'name': file_name,
                 'path': relative_path,

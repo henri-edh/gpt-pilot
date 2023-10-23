@@ -3,21 +3,24 @@ ROLES = {
     'product_owner': ['project_description', 'user_stories', 'user_tasks'],
     'architect': ['architecture'],
     'tech_lead': ['development_planning'],
-    'full_stack_developer': ['create_scripts', 'coding'],
+    'full_stack_developer': ['coding'],
     'dev_ops': ['environment_setup'],
+    'code_monkey': ['coding']
 }
 STEPS = [
     'project_description',
     'user_stories',
     'user_tasks',
     'architecture',
-    'development_planning',
     'environment_setup',
-    'coding'
+    'development_planning',
+    'coding',
+    'finished'
 ]
 
 IGNORE_FOLDERS = [
     '.git',
+    '.gpt-pilot',
     '.idea',
     '.vscode',
     '__pycache__',

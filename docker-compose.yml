@@ -16,11 +16,14 @@ services:
             - DB_PORT=5432
             - DB_USER=pilot
             - DB_PASSWORD=pilot
+        volumes:
+            - ~/gpt-pilot-workspace:/usr/src/app/workspace
         build:
             context: .
             dockerfile: Dockerfile
         ports:
-        - "7681:7681"
+            - "7681:7681"
+            - "3000:3000"
         depends_on:
             postgres:
                 condition: service_healthy
@@ -34,7 +37,7 @@ services:
         ports:
         - "5432:5432"
         healthcheck:
-            test: ["CMD-SHELL", "pg_isready -U user"]
+            test: ["CMD-SHELL", "pg_isready -U pilot"]
             interval: 30s
             timeout: 10s
             retries: 3

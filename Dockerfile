@@ -1,4 +1,4 @@
-FROM python:3
+FROM python:3.11
 
 # Download precompiled ttyd binary from GitHub releases
 RUN apt-get update && \
@@ -22,8 +22,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -m venv pilot-env
 RUN /bin/bash -c "source pilot-env/bin/activate"
 
-WORKDIR /usr/src/app/pilot
 RUN pip install -r requirements.txt
+WORKDIR /usr/src/app/pilot
 
 EXPOSE 7681
 CMD ["ttyd", "bash"]

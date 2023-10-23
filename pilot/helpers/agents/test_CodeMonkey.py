@@ -1,23 +1,19 @@
 import re
 import os
-from unittest.mock import patch, Mock, MagicMock
+from unittest.mock import patch, MagicMock
 from dotenv import load_dotenv
 load_dotenv()
 
 from .CodeMonkey import CodeMonkey
 from .Developer import Developer
 from database.models.files import File
+from database.models.development_steps import DevelopmentSteps
 from helpers.Project import Project, update_file, clear_directory
 from helpers.AgentConvo import AgentConvo
+from test.test_utils import mock_terminal_size
 
 SEND_TO_LLM = False
 WRITE_TO_FILE = False
-
-
-def mock_terminal_size():
-    mock_size = Mock()
-    mock_size.columns = 80  # or whatever width you want
-    return mock_size
 
 
 class TestCodeMonkey:
@@ -34,15 +30,18 @@ class TestCodeMonkey:
             current_step='coding',
         )
 
-        self.project.root_path = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                              '../../../workspace/TestDeveloper'))
+        self.project.set_root_path(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              '../../../workspace/TestDeveloper')))
         self.project.technologies = []
+        last_step = DevelopmentSteps()
+        last_step.id = 1
+        self.project.checkpoints = {'last_development_step': last_step}
         self.project.app = None
         self.developer = Developer(self.project)
         self.codeMonkey = CodeMonkey(self.project, developer=self.developer)
 
-    @patch('helpers.AgentConvo.get_development_step_from_hash_id', return_value=None)
-    @patch('helpers.AgentConvo.save_development_step', return_value=None)
+    @patch('helpers.AgentConvo.get_saved_development_step', return_value=None)
+    @patch('helpers.AgentConvo.save_development_step')
     @patch('os.get_terminal_size', mock_terminal_size)
     @patch.object(File, 'insert')
     def test_implement_code_changes(self, mock_get_dev, mock_save_dev, mock_file_insert):
@@ -54,13 +53,13 @@ class TestCodeMonkey:
         else:
             convo = MagicMock()
             mock_responses = [
-                [],
-                [{
+                # [],
+                {'files': [{
                     'content': 'Washington',
                     'description': "A new .txt file with the word 'Washington' in it.",
                     'name': 'washington.txt',
                     'path': 'washington.txt'
-                }]
+                }]}
             ]
             convo.send_message.side_effect = mock_responses
 
@@ -79,8 +78,8 @@ class TestCodeMonkey:
                 assert (called_data['path'] == '/' or called_data['path'] == called_data['name'])
                 assert called_data['content'] == 'Washington'
 
-    @patch('helpers.AgentConvo.get_development_step_from_hash_id', return_value=None)
-    @patch('helpers.AgentConvo.save_development_step', return_value=None)
+    @patch('helpers.AgentConvo.get_saved_development_step')
+    @patch('helpers.AgentConvo.save_development_step')
     @patch('os.get_terminal_size', mock_terminal_size)
     @patch.object(File, 'insert')
     def test_implement_code_changes_with_read(self, mock_get_dev, mock_save_dev, mock_file_insert):
@@ -94,13 +93,13 @@ class TestCodeMonkey:
         else:
             convo = MagicMock()
             mock_responses = [
-                ['file_to_read.txt', 'output.txt'],
-                [{
+                # ['file_to_read.txt', 'output.txt'],
+                {'files': [{
                     'content': 'Hello World!\n',
                     'description': 'This file is the output file. The content of file_to_read.txt is copied into this file.',
                     'name': 'output.txt',
                     'path': 'output.txt'
-                }]
+                }]}
             ]
             convo.send_message.side_effect = mock_responses
 
