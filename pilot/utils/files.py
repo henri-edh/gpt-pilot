@@ -30,7 +30,7 @@ def setup_workspace(args) -> str:
     try:
         save_user_app(args.get('user_id'), args.get('app_id'), project_path)
     except Exception as e:
-        print(str(e))
+        print(f'Error saving user app: {str(e)}')
 
     print(os.path.basename(project_path), type='project_folder_name')
     return project_path
@@ -41,3 +41,7 @@ def create_directory(parent_directory, new_directory):
     os.makedirs(new_directory_path, exist_ok=True)
 
     return new_directory_path
+
+
+def count_lines_of_code(files):
+    return sum(len(file['content'].splitlines()) for file in files)

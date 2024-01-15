@@ -3,13 +3,14 @@ from utils.style import color_yellow, color_red
 from peewee import DoesNotExist, IntegrityError
 from functools import reduce
 import operator
-import psycopg2
-from psycopg2.extensions import quote_ident
+from database.config import DB_NAME, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DATABASE_TYPE
+if DATABASE_TYPE == "postgres":
+    import psycopg2
+    from psycopg2.extensions import quote_ident
 
 import os
 from const.common import PROMPT_DATA_TO_IGNORE, STEPS
 from logger.logger import logger
-from database.config import DB_NAME, DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DATABASE_TYPE
 from database.models.components.base_models import database
 from database.models.user import User
 from database.models.app import App
@@ -290,10 +291,9 @@ def save_development_step(project, prompt_path, prompt_data, messages, llm_respo
 
     development_step = hash_and_save_step(DevelopmentSteps, project.args['app_id'], unique_data, data_fields,
                                           "Saved Development Step")
-    if development_step is not None:
-        project.checkpoints['last_development_step'] = development_step
+    project.checkpoints['last_development_step'] = development_step
 
-        project.save_files_snapshot(development_step.id)
+    project.save_files_snapshot(development_step.id)
 
     return development_step
 
@@ -301,10 +301,13 @@ def save_development_step(project, prompt_path, prompt_data, messages, llm_respo
 def get_saved_development_step(project):
     development_step = get_db_model_from_hash_id(DevelopmentSteps, project.args['app_id'],
                                                  project.checkpoints['last_development_step'], project.current_step)
+
+    if development_step is None and project.skip_steps:
+        project.finish_loading()
     return development_step
 
 
-def save_command_run(project, command, cli_response):
+def save_command_run(project, command, cli_response, done_or_error_response, exit_code):
     if project.current_step != 'coding':
         return
 
@@ -317,6 +320,8 @@ def save_command_run(project, command, cli_response):
     data_fields = {
         'command': command,
         'cli_response': cli_response,
+        'done_or_error_response': done_or_error_response,
+        'exit_code': exit_code,
     }
 
     command_run = hash_and_save_step(CommandRuns, project.args['app_id'], unique_data, data_fields, "Saved Command Run")
@@ -331,10 +336,13 @@ def get_saved_command_run(project, command):
     # }
     command_run = get_db_model_from_hash_id(CommandRuns, project.args['app_id'],
                                             project.checkpoints['last_command_run'], project.current_step)
+
+    if command_run is None and project.skip_steps:
+        project.finish_loading()
     return command_run
 
 
-def save_user_input(project, query, user_input):
+def save_user_input(project, query, user_input, hint):
     if project.current_step != 'coding':
         return
 
@@ -346,6 +354,7 @@ def save_user_input(project, query, user_input):
     data_fields = {
         'query': query,
         'user_input': user_input,
+        'hint': hint,
     }
     user_input = hash_and_save_step(UserInputs, project.args['app_id'], unique_data, data_fields, "Saved User Input")
     project.checkpoints['last_user_input'] = user_input
@@ -359,6 +368,9 @@ def get_saved_user_input(project, query):
     # }
     user_input = get_db_model_from_hash_id(UserInputs, project.args['app_id'], project.checkpoints['last_user_input'],
                                            project.current_step)
+
+    if user_input is None and project.skip_steps:
+        project.finish_loading()
     return user_input
 
 
@@ -377,6 +389,9 @@ def delete_subsequent_steps(Model, app, step):
         if subsequent_step:
             delete_subsequent_steps(Model, app, subsequent_step)
             subsequent_step.delete_instance()
+            if Model == DevelopmentSteps:
+                FileSnapshot.delete().where(FileSnapshot.development_step == subsequent_step).execute()
+                Feature.delete().where(Feature.previous_step == subsequent_step).execute()
 
 
 def get_all_connected_steps(step, previous_step_field_name):
@@ -420,10 +435,10 @@ def save_file_description(project, path, name, description):
      .execute())
 
 
-def save_feature(app_id, summary, messages):
+def save_feature(app_id, summary, messages, previous_step):
     try:
         app = get_app(app_id)
-        feature = Feature.create(app=app, summary=summary, messages=messages)
+        feature = Feature.create(app=app, summary=summary, messages=messages, previous_step=previous_step)
         return feature
     except DoesNotExist:
         raise ValueError(f"No app with id: {app_id}")
@@ -433,7 +448,10 @@ def get_features_by_app_id(app_id):
     try:
         app = get_app(app_id)
         features = Feature.select().where(Feature.app == app).order_by(Feature.created_at)
-        return [model_to_dict(feature) for feature in features]
+        features_dict = [model_to_dict(feature) for feature in features]
+
+        # return only 'summary' because we store all prompt_data to DB
+        return [{'summary': feature['summary']} for feature in features_dict]
     except DoesNotExist:
         raise ValueError(f"No app with id: {app_id}")
 

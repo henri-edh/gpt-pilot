@@ -127,6 +127,19 @@ COMMANDS_TO_RUN = {
     },
 }
 
+COMMAND_TO_RUN = {
+    'definitions': [
+        {
+            'name': 'command_to_run',
+            'description': 'Command that starts the app.',
+            'parameters': command_definition("Command that starts the app. If app can't be started for some reason, return command as empty string ''."),
+        },
+    ],
+    'functions': {
+        'process_commands': run_commands
+    },
+}
+
 DEV_TASKS_BREAKDOWN = {
     'definitions': [
         {
@@ -187,14 +200,10 @@ IMPLEMENT_TASK = {
                             'properties': {
                                 'type': {
                                     'type': 'string',
-                                    'enum': ['command', 'kill_process', 'code_change', 'human_intervention'],
+                                    'enum': ['command', 'code_change', 'human_intervention'],
                                     'description': 'Type of the development step that needs to be done to complete the entire task.',
                                 },
                                 'command': command_definition(),
-                                'kill_process': {
-                                    'type': 'string',
-                                    'description': 'To kill a process that was left running by a previous `command` step provide the `command_id` in this field and set `type` to "kill_process".',
-                                },
                                 'code_change': {
                                     'type': 'object',
                                     'description': 'A code change that needs to be implemented. This should be used only if the task is of a type "code_change".',
@@ -209,7 +218,7 @@ IMPLEMENT_TASK = {
                                         },
                                         'content': {
                                             'type': 'string',
-                                            'description': 'Full content of the file that needs to be implemented.',
+                                            'description': 'Full content of the file that needs to be implemented. **IMPORTANT**When you want to add a comment that tells the user to add the previous implementation at that place, make sure that the comment starts with `[OLD CODE]` and add a description of what old code should be inserted here. For example, `[OLD CODE] Login route`.',
                                         },
                                     },
                                     'required': ['name', 'path', 'content'],
@@ -381,11 +390,11 @@ DEVELOPMENT_PLAN = {
                             },
                             'programmatic_goal': {
                                 'type': 'string',
-                                'description': 'programmatic goal that will determine if a task can be marked as done from a programmatic perspective (this will result in an automated test that is run before the task is sent to you for a review)',
+                                'description': 'Detailed description of programmatic goal. Programmatic goal that will determine if a task can be marked as done from a programmatic perspective (this will result in an automated test that is run before the task is sent to you for a review). All details previously specified by user that are important for this task must be included in this programmatic goal.',
                             },
                             'user_review_goal': {
                                 'type': 'string',
-                                'description': 'user-review goal that will determine if a task is done or not but from a user perspective since it will be reviewed by a human',
+                                'description': 'User review goal that will determine if a task is done or not, but from a user perspective since it will be reviewed by a human.',
                             }
                         },
                         'required': ['description', 'programmatic_goal', 'user_review_goal'],
@@ -469,7 +478,7 @@ IMPLEMENT_CHANGES = {
                             },
                             'content': {
                                 'type': 'string',
-                                'description': 'Full content of the file that needs to be saved on the disk.',
+                                'description': 'Full content of the file that needs to be saved on the disk. **IMPORTANT**When you want to add a comment that tells the user to add the previous implementation at that place, make sure that the comment starts with `[OLD CODE]` and add a description of what old code should be inserted here. For example, `[OLD CODE] Login route`.',
                             },
                             'description': {
                                 'type': 'string',
@@ -501,13 +510,13 @@ GET_TEST_TYPE = {
                 'type': {
                     'type': 'string',
                     'description': 'Type of a test that needs to be run. If this is just an intermediate step in getting a task done, put `no_test` as the type and we\'ll just go onto the next task without testing.',
-                    'enum': ['automated_test', 'command_test', 'manual_test', 'no_test']
+                    'enum': ['command_test', 'manual_test', 'no_test']
                 },
                 'command': command_definition('Command that needs to be run to test the changes.', 'Timeout in milliseconds that represent the approximate time this command takes to finish. If you need to run a command that doesn\'t finish by itself (eg. a command to run an app), put the timeout to 3000 milliseconds. If you need to create a directory that doesn\'t exist and is not the root project directory, always create it by running a command `mkdir`'),
-                'automated_test_description': {
-                    'type': 'string',
-                    'description': 'Description of an automated test that needs to be run to test the changes. This should be used only if the test type is "automated_test" and it should thoroughly describe what needs to be done to implement the automated test so that when someone looks at this test can know exactly what needs to be done to implement this automated test.',
-                },
+                # 'automated_test_description': {
+                #     'type': 'string',
+                #     'description': 'Description of an automated test that needs to be run to test the changes. This should be used only if the test type is "automated_test" and it should thoroughly describe what needs to be done to implement the automated test so that when someone looks at this test can know exactly what needs to be done to implement this automated test.',
+                # },
                 'manual_test_description': {
                     'type': 'string',
                     'description': 'Description of a manual test that needs to be run to test the changes. This should be used only if the test type is "manual_test".',
@@ -546,14 +555,10 @@ DEBUG_STEPS_BREAKDOWN = {
                             'properties': {
                                 'type': {
                                     'type': 'string',
-                                    'enum': ['command', 'kill_process', 'code_change', 'human_intervention'],
+                                    'enum': ['command', 'code_change', 'human_intervention'],
                                     'description': 'Type of the step that needs to be done to debug this issue.',
                                 },
                                 'command': command_definition('Command that needs to be run to debug this issue.', 'Timeout in milliseconds that represent the approximate time this command takes to finish. If you need to run a command that doesn\'t finish by itself (eg. a command to run an app), put the timeout to 3000 milliseconds.'),
-                                'kill_process': {
-                                    'type': 'string',
-                                    'description': 'To kill a process that was left running by a previous `command` step provide the `command_id` in this field and set `type` to "kill_process".',
-                                },
                                 'code_change_description': {
                                     'type': 'string',
                                     'description': 'Description of a step in debugging this issue when there are code changes required. This should be used only if the task is of a type "code_change" and it should thoroughly describe what needs to be done to implement the code change for a single file - it cannot include changes for multiple files.',
@@ -584,4 +589,85 @@ DEBUG_STEPS_BREAKDOWN = {
     'functions': {
         'start_debugging': lambda steps: steps
     },
+}
+
+GET_MISSING_SNIPPETS = {
+    'definitions': [{
+        'name': 'get_missing_snippets',
+        'description': 'Gets the list of snippets that are missing from the code.',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'snippets': {
+                    'type': 'array',
+                    'description': 'List of snippets that are missing from the code.',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'comment_label': {
+                                'type': 'string',
+                                'description': 'Comment label that identifies the snippet that needs to be inserted.',
+                            },
+                            'snippet': {
+                                'type': 'string',
+                                'description': 'The code from earlier in this conversation that needs to be inserted instead of the comment. **IMPORTANT** You always need to write the entire snippet, and under no circumstances should you ever leave any part of the code snippet unwritten. **IMPORTANT** Every single line of code that exists in the place where the comment lives right now should be replaced. **IMPORTANT** Do not include any code that is above or below the comment but only the code that should be in the position of the comment. **IMPORTANT** Make sure that you write the entire snippet that should be inserted in the place of the comment_label, including all control structures, error handling, and any other relevant logic that was in the original code.',
+                            },
+                            'file_path': {
+                                'type': 'string',
+                                'description': 'Path to the file where the snippet needs to be inserted.',
+                            }
+                        },
+                        'required': ['comment_label', 'snippet', 'file_path'],
+                    }
+                }
+            },
+            'required': ['snippets'],
+        },
+    }],
+}
+
+GET_FULLY_CODED_FILE = {
+    'definitions': [{
+        'name': 'get_fully_coded_file',
+        'description': 'Gets the fully coded file.',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'file_content': {
+                    'type': 'string',
+                    'description': 'Fully coded file. This contains only the lines of code and no other text.',
+                }
+            },
+            'required': ['file_content'],
+        },
+    }],
+    'functions': {
+        'get_fully_coded_file': lambda file: file
+    },
+}
+
+
+GET_DOCUMENTATION_FILE = {
+    'definitions': [{
+        'name': 'get_documentation_file',
+        'description': 'Gets the full content of requested documentation file.',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'name': {
+                    'type': 'string',
+                    'description': 'Name of the documentation file that needs to be saved on the disk.',
+                },
+                'path': {
+                    'type': 'string',
+                    'description': 'Relative path of the documentation file with the file name that needs to be saved.',
+                },
+                'content': {
+                    'type': 'string',
+                    'description': 'Full content of the documentation file that needs to be saved on the disk. **IMPORTANT**When you want to add a comment that tells the user to add the previous implementation at that place, make sure that the comment starts with `[OLD CODE]` and add a description of what old code should be inserted here. For example, `[OLD CODE] Login route`.',
+                },
+            },
+            'required': ['name', 'path', 'content'],
+        },
+    }],
 }

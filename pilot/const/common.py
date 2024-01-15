@@ -1,3 +1,6 @@
+import os
+
+
 APP_TYPES = ['Web App', 'Script', 'Mobile App', 'Chrome Extension']
 ROLES = {
     'product_owner': ['project_description', 'user_stories', 'user_tasks'],
@@ -18,17 +21,22 @@ STEPS = [
     'finished'
 ]
 
+additional_ignore_folders = os.environ.get('IGNORE_FOLDERS', '').split(',')
+
+# TODO: rename to IGNORE_PATHS as it also contains files
 IGNORE_FOLDERS = [
     '.git',
     '.gpt-pilot',
     '.idea',
     '.vscode',
+    '.DS_Store',
     '__pycache__',
     'node_modules',
     'package-lock.json',
     'venv',
     'dist',
     'build',
-]
+    'target'
+] + [folder for folder in additional_ignore_folders if folder]
 
 PROMPT_DATA_TO_IGNORE = {'directory_tree', 'name'}

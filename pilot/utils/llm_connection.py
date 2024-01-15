@@ -10,46 +10,50 @@ from prompt_toolkit.styles import Style
 from jsonschema import validate, ValidationError
 from utils.style import color_red
 from typing import List
-from const.llm import MIN_TOKENS_FOR_GPT_RESPONSE, MAX_GPT_MODEL_TOKENS
+from const.llm import MAX_GPT_MODEL_TOKENS
+from const.messages import AFFIRMATIVE_ANSWERS
 from logger.logger import logger, logging
 from helpers.exceptions import TokenLimitError, ApiKeyNotDefinedError
 from utils.utils import fix_json, get_prompt
 from utils.function_calling import add_function_calls_to_request, FunctionCallSet, FunctionType
 from utils.questionary import styled_text
 
+from .telemetry import telemetry
+
+tokenizer = tiktoken.get_encoding("cl100k_base")
+
+
 def get_tokens_in_messages(messages: List[str]) -> int:
-    tokenizer = tiktoken.get_encoding("cl100k_base")  # GPT-4 tokenizer
     tokenized_messages = [tokenizer.encode(message['content']) for message in messages]
     return sum(len(tokens) for tokens in tokenized_messages)
 
 
+# TODO: not used anywhere
 def num_tokens_from_functions(functions):
     """Return the number of tokens used by a list of functions."""
-    encoding = tiktoken.get_encoding("cl100k_base")
-
     num_tokens = 0
     for function in functions:
-        function_tokens = len(encoding.encode(function['name']))
-        function_tokens += len(encoding.encode(function['description']))
+        function_tokens = len(tokenizer.encode(function['name']))
+        function_tokens += len(tokenizer.encode(function['description']))
 
         if 'parameters' in function:
             parameters = function['parameters']
             if 'properties' in parameters:
                 for propertiesKey in parameters['properties']:
-                    function_tokens += len(encoding.encode(propertiesKey))
+                    function_tokens += len(tokenizer.encode(propertiesKey))
                     v = parameters['properties'][propertiesKey]
                     for field in v:
                         if field == 'type':
                             function_tokens += 2
-                            function_tokens += len(encoding.encode(v['type']))
+                            function_tokens += len(tokenizer.encode(v['type']))
                         elif field == 'description':
                             function_tokens += 2
-                            function_tokens += len(encoding.encode(v['description']))
+                            function_tokens += len(tokenizer.encode(v['description']))
                         elif field == 'enum':
                             function_tokens -= 3
                             for o in v['enum']:
                                 function_tokens += 3
-                                function_tokens += len(encoding.encode(o))
+                                function_tokens += len(tokenizer.encode(o))
                 function_tokens += 11
 
         num_tokens += function_tokens
@@ -234,9 +238,10 @@ def retry_on_exception(func):
                 logger.error(f'There was a problem with request to openai API: {err_str}')
 
                 project = args[2]
+                print('yes/no', type='buttons-only')
                 user_message = styled_text(
                     project,
-                    "Do you want to try make the same request again? If yes, just press ENTER. Otherwise, type 'no'.",
+                    'Do you want to try make the same request again? If yes, just press ENTER. Otherwise, type "no".',
                     style=Style.from_dict({
                         'question': '#FF0000 bold',
                         'answer': '#FF910A bold'
@@ -245,7 +250,7 @@ def retry_on_exception(func):
 
                 # TODO: take user's input into consideration - send to LLM?
                 # https://github.com/Pythagora-io/gpt-pilot/issues/122
-                if user_message != '':
+                if user_message.lower() not in AFFIRMATIVE_ANSWERS:
                     return {}
 
     return wrapper
@@ -291,7 +296,7 @@ def stream_gpt_completion(data, req_type, project):
             lines_printed += count_lines_based_on_width(buffer, terminal_width)
         logger.debug(f'lines printed: {lines_printed} - {terminal_width}')
 
-        delete_last_n_lines(lines_printed)
+        # delete_last_n_lines(lines_printed)  # TODO fix and test count_lines_based_on_width()
         return result_data
 
     # spinner = spinner_start(yellow("Waiting for OpenAI API response..."))
@@ -300,6 +305,11 @@ def stream_gpt_completion(data, req_type, project):
     # Configure for the selected ENDPOINT
     model = os.getenv('MODEL_NAME', 'gpt-4')
     endpoint = os.getenv('ENDPOINT')
+
+    # Model will be set many times but we don't care, as there are no side-effects to it.
+    telemetry.set("model", model)
+    telemetry.inc("num_llm_requests")
+    telemetry.inc("num_llm_tokens", get_tokens_in_messages(data['messages']))
 
     logger.info(f'> Request model: {model}')
     if logger.isEnabledFor(logging.DEBUG):

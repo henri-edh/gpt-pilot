@@ -34,6 +34,7 @@ class ProductOwner(Agent):
                 self.project.set_root_path(setup_workspace(self.project.args))
                 self.project.project_description = step['summary']
                 self.project.project_description_messages = step['messages']
+                self.project.main_prompt = step['prompt']
                 return
 
         # PROJECT DESCRIPTION
@@ -41,13 +42,15 @@ class ProductOwner(Agent):
         if 'app_type' not in self.project.args:
             self.project.args['app_type'] = ask_for_app_type()
         if 'name' not in self.project.args:
-            self.project.args['name'] = clean_filename(ask_user(self.project, 'What is the project name?'))
+            question = 'What is the project name?'
+            print(question, type='ipc')
+            self.project.args['name'] = clean_filename(ask_user(self.project, question))
 
         self.project.app = save_app(self.project)
 
         self.project.set_root_path(setup_workspace(self.project.args))
 
-        main_prompt = ask_for_main_app_definition(self.project)
+        self.project.main_prompt = ask_for_main_app_definition(self.project)
 
         print(json.dumps({'open_project': {
             #'uri': 'file:///' + self.project.root_path.replace('\\', '/'),
@@ -55,12 +58,12 @@ class ProductOwner(Agent):
             'name': self.project.args['name'],
         }}), type='info')
 
-        high_level_messages = self.ask_clarifying_questions(main_prompt)
+        high_level_messages = self.ask_clarifying_questions(self.project.main_prompt)
 
         high_level_summary = self.generate_project_summary(high_level_messages)
 
         save_progress(self.project.args['app_id'], self.project.current_step, {
-            "prompt": main_prompt,
+            "prompt": self.project.main_prompt,
             "messages": high_level_messages,
             "summary": high_level_summary,
             "app_data": generate_app_data(self.project.args)
@@ -86,7 +89,7 @@ class ProductOwner(Agent):
         return convo_project_description.send_message('utils/summary.prompt',
                                                       {'conversation': '\n'.join(
                                                           [f"{msg['role']}: {msg['content']}" for msg in
-                                                           high_level_messages])})
+                                                           high_level_messages])}, should_log_message=False)
 
     def get_user_stories(self):
         if not self.project.args.get('advanced', False):

@@ -13,10 +13,11 @@ def remove_ansi_codes(s: str) -> str:
 
 def styled_select(*args, **kwargs):
     kwargs["style"] = style_config.get_style()
+    # TODO add saving and loading of user input
     return questionary.select(*args, **kwargs).unsafe_ask()  # .ask() is included here
 
 
-def styled_text(project, question, ignore_user_input_count=False, style=None):
+def styled_text(project, question, ignore_user_input_count=False, style=None, hint=None):
     if not ignore_user_input_count:
         project.user_inputs_count += 1
         user_input = get_saved_user_input(project, question)
@@ -27,17 +28,17 @@ def styled_text(project, question, ignore_user_input_count=False, style=None):
             print(color_yellow_bold(f'{user_input.user_input}'))
             return user_input.user_input
 
-    if project.ipc_client_instance is None or project.ipc_client_instance.client is None:
+    if project.check_ipc():
+        response = print(question, type='user_input_request')
+        print(response)
+    else:
         used_style = style if style is not None else style_config.get_style()
         question = remove_ansi_codes(question)  # Colorama and questionary are not compatible and styling doesn't work
         flush_input()
         response = questionary.text(question, style=used_style).unsafe_ask()  # .ask() is included here
-    else:
-        response = print(question, type='user_input_request')
-        print(response)
 
     if not ignore_user_input_count:
-        user_input = save_user_input(project, question, response)
+        save_user_input(project, question, response, hint)
 
     print('\n\n', end='')
     return response
@@ -45,8 +46,14 @@ def styled_text(project, question, ignore_user_input_count=False, style=None):
 
 def get_user_feedback():
     return questionary.text('How did GPT Pilot do? Were you able to create any app that works? '
-                'Please write any feedback you have or just press ENTER to exit: ',
-                style=style_config.get_style()).unsafe_ask()
+                            'Please write any feedback you have or just press ENTER to exit: ',
+                            style=style_config.get_style()).unsafe_ask()
+
+
+def ask_user_to_store_init_prompt():
+    return questionary.text('We would appreciate if you let us store your initial app prompt. '
+                            'If you are OK with that, please just press ENTER',
+                            style=style_config.get_style()).unsafe_ask()
 
 
 def flush_input():

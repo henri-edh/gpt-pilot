@@ -67,7 +67,7 @@ class AgentConvo:
 
             if self.agent.project.skip_until_dev_step and str(
                     development_step.id) == self.agent.project.skip_until_dev_step:
-                self.agent.project.skip_steps = False
+                self.agent.project.finish_loading()
                 delete_all_subsequent_steps(self.agent.project)
 
                 if 'delete_unrelated_steps' in self.agent.project.args and self.agent.project.args[
@@ -81,6 +81,7 @@ class AgentConvo:
         else:
             # if we don't, get the response from LLM
             try:
+                self.replace_files()
                 response = create_gpt_chat_completion(self.messages, self.high_level_step, self.agent.project,
                                                       function_calls=function_calls)
             except TokenLimitError as e:
@@ -88,7 +89,7 @@ class AgentConvo:
                 raise e
 
             # TODO: move this code to Developer agent - https://github.com/Pythagora-io/gpt-pilot/issues/91#issuecomment-1751964079
-            if self.agent.__class__.__name__ == 'Developer':
+            if hasattr(self.agent, 'save_dev_steps') and self.agent.save_dev_steps:
                 save_development_step(self.agent.project, prompt_path, prompt_data, self.messages, response)
 
         # TODO handle errors from OpenAI
@@ -155,9 +156,9 @@ class AgentConvo:
 
         # Continue conversation until GPT response equals END_RESPONSE
         while response != END_RESPONSE:
-            user_message = ask_user(self.agent.project, response,
-                                    hint=color_yellow("Do you want to add anything else? If not, ") + color_yellow_bold(
-                                        'just press ENTER.'),
+            user_message = ask_user(self.agent.project,
+                                    'Do you want to add anything else? If not, just press ENTER.',
+                                    hint=response,
                                     require_some_input=False)
 
             if user_message == "":
@@ -187,7 +188,7 @@ class AgentConvo:
         for msg in self.messages:
             if msg['role'] == 'user':
                 for file in files:
-                    self.replace_file_content(msg['content'], file['path'], file['content'])
+                    msg['content'] = self.replace_file_content(msg['content'], f"{file['path']}/{file['name']}", file['content'])
 
     def escape_specials(self, s):
         s = s.replace("\\", "\\\\")
@@ -211,14 +212,13 @@ class AgentConvo:
         return s
 
     def replace_file_content(self, message, file_path, new_content):
-        escaped_file_path = re.escape(file_path)
-
-        pattern = rf'\*\*{{ {escaped_file_path} }}\*\*\n```\n(.*?)\n```'
+        pattern = rf'\*\*{re.escape(file_path)}\*\*:\n```\n(.*?)\n```'
 
         # Escape special characters in new_content for the sake of regex replacement
         new_content_escaped = self.escape_specials(new_content)
+        file_path_escaped = self.escape_specials(file_path)
 
-        new_section_content = f'**{{ {file_path} }}**\n```\n{new_content_escaped}\n```'
+        new_section_content = f'**{file_path_escaped}**\n```\n{new_content_escaped}\n```'
 
         updated_message, num_replacements = re.subn(pattern, new_section_content, message, flags=re.DOTALL)
 
@@ -240,8 +240,9 @@ class AgentConvo:
         print_msg = capitalize_first_word_with_underscores(self.high_level_step)
         if self.log_to_user:
             if self.agent.project.checkpoints['last_development_step'] is not None:
-                print(color_yellow("\nDev step ") + color_yellow_bold(
-                    str(self.agent.project.checkpoints['last_development_step'])) + '\n', end='')
+                dev_step_msg = f'\nDev step {str(self.agent.project.checkpoints["last_development_step"])}\n'
+                print(color_yellow_bold(dev_step_msg), end='')
+                logger.info(dev_step_msg)
             print(f"\n{content}\n", type='local')
         logger.info(f"{print_msg}: {content}\n")
 
@@ -258,6 +259,7 @@ class AgentConvo:
         })
 
     def to_playground(self):
+        # Internal function to help debugging in OpenAI Playground, not to be used in production
         with open('const/convert_to_playground_convo.js', 'r', encoding='utf-8') as file:
             content = file.read()
         process = subprocess.Popen('pbcopy', stdin=subprocess.PIPE)
