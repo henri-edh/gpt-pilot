@@ -82,6 +82,19 @@ def test_clear_data_resets_times():
     assert telemetry.end_time is None
 
 
+def test_clear_counter_resets_times_but_leaves_data():
+    telemetry = Telemetry()
+    telemetry.data["model"] = "test-model"
+    telemetry.start_time = 1234567890
+    telemetry.end_time = 1234567895
+
+    telemetry.clear_counters()
+
+    assert telemetry.data["model"] == "test-model"
+    assert telemetry.start_time is None
+    assert telemetry.end_time is None
+
+
 @patch("utils.telemetry.settings")
 @patch("utils.telemetry.uuid4")
 def test_telemetry_setup_already_enabled(mock_uuid4, mock_settings):
@@ -247,7 +260,8 @@ def test_send_enabled_and_successful(mock_settings, mock_post, caplog):
     }
 
     telemetry = Telemetry()
-    telemetry.send()
+    with patch.object(telemetry, "calculate_statistics"):
+        telemetry.send()
 
     expected = {
         "pathId": "test-id",
@@ -269,7 +283,8 @@ def test_send_enabled_but_post_fails(mock_settings, mock_post):
     mock_post.side_effect = Exception("Connection error")
 
     telemetry = Telemetry()
-    telemetry.send()
+    with patch.object(telemetry, "calculate_statistics"):
+        telemetry.send()
 
     expected = {
         "pathId": "test-id",
@@ -308,7 +323,7 @@ def test_send_no_endpoint_configured(mock_settings, mock_post, caplog):
 
 @patch("utils.telemetry.requests.post")
 @patch("utils.telemetry.settings")
-def test_send_clears_data_after_sending(mock_settings, _mock_post):
+def test_send_clears_counters_after_sending(mock_settings, _mock_post):
     mock_settings.telemetry = {
         "id": "test-id",
         "endpoint": "test-endpoint",
@@ -317,9 +332,11 @@ def test_send_clears_data_after_sending(mock_settings, _mock_post):
 
     telemetry = Telemetry()
     telemetry.data["model"] = "test-model"
+    telemetry.data["num_llm_tokens"] = 100
     telemetry.send()
 
-    assert telemetry.data["model"] is None
+    assert telemetry.data["model"] == "test-model"
+    assert telemetry.data["num_llm_tokens"] == 0
 
 
 @patch("utils.telemetry.settings")
@@ -336,8 +353,83 @@ def test_record_crash(mock_settings):
     except Exception as err:
         telemetry.record_crash(err)
 
+    assert telemetry.data["end_result"] == "failure"
     diag = telemetry.data["crash_diagnostics"]
     assert diag["exception_class"] == "ValueError"
     assert diag["exception_message"] == "test error"
     assert diag["frames"][0]["file"] == "pilot/test/utils/test_telemetry.py"
     assert "ValueError: test error" in diag["stack_trace"]
+
+
+@patch("utils.telemetry.settings")
+def test_record_crash_crashes(mock_settings):
+    mock_settings.telemetry = {
+        "id": "test-id",
+        "endpoint": "test-endpoint",
+        "enabled": True,
+    }
+
+    telemetry = Telemetry()
+    telemetry.record_crash(None)
+
+    assert telemetry.data["end_result"] == "failure"
+    diag = telemetry.data["crash_diagnostics"]
+    assert diag["exception_class"] == "NoneType"
+    assert diag["exception_message"] == "None"
+    assert diag["frames"] == []
+
+
+@patch("utils.telemetry.settings")
+def test_record_llm_request(mock_settings):
+    mock_settings.telemetry = {
+        "id": "test-id",
+        "endpoint": "test-endpoint",
+        "enabled": True,
+    }
+
+    telemetry = Telemetry()
+    telemetry.record_llm_request(100000, 3600, True)
+    telemetry.record_llm_request(90000, 1, False)
+    telemetry.record_llm_request(1, 1800, False)
+
+    # All three
+    assert telemetry.data["num_llm_requests"] == 3
+    # Only the last two
+    assert telemetry.data["num_llm_tokens"] == 90001
+    # Only the first one
+    assert telemetry.data["num_llm_errors"] == 1
+
+    # First two
+    assert telemetry.large_requests == [100000, 90000]
+    # FIrst and last
+    assert telemetry.slow_requests == [3600, 1800]
+
+
+
+@patch("utils.telemetry.settings")
+def test_calculate_statistics(mock_settings):
+    mock_settings.telemetry = {
+        "id": "test-id",
+        "endpoint": "test-endpoint",
+        "enabled": True,
+    }
+
+    telemetry = Telemetry()
+    telemetry.large_requests = [10, 10, 20, 40, 100]
+    telemetry.slow_requests = [10, 10, 20, 40, 100]
+
+    telemetry.calculate_statistics()
+    assert telemetry.data["large_requests"] == {
+        "num_requests": 5,
+        "min_tokens": 10,
+        "max_tokens": 100,
+        "avg_tokens": 36,
+        "median_tokens": 20,
+    }
+    assert telemetry.data["slow_requests"] == {
+        "num_requests": 5,
+        "min_time": 10,
+        "max_time": 100,
+        "avg_time": 36,
+        "median_time": 20,
+    }

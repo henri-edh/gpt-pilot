@@ -93,7 +93,64 @@ USER_TASKS = {
 
 ARCHITECTURE = {
     'definitions': [
-        return_array_from_prompt('technologies', 'technology', 'technologies')
+        {
+            'name': 'process_architecture',
+            'description': "Get architecture and the list of system dependencies required for the project.",
+            'parameters': {
+                'type': 'object',
+                "properties": {
+                    "architecture": {
+                        "type": "string",
+                        "description": "General description of the app architecture.",
+                    },
+                    "system_dependencies": {
+                        "type": "array",
+                        "description": "List of system dependencies required to build and run the app.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Name of the system dependency, for example Node.js or Python."
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "One-line description of the dependency.",
+                                },
+                                "test": {
+                                    "type": "string",
+                                    "description": "Command line to test whether the dependency is available on the system.",
+                                },
+                                "required_locally": {
+                                    "type": "boolean",
+                                    "description": "Whether this dependency must be installed locally (as opposed to connecting to cloud or other server)",
+                                }
+                            },
+                            "required": ["name", "description", "test", "required_locally"],
+                        },
+                    },
+                    "package_dependencies": {
+                        "type": "array",
+                        "description": "List of framework/language-specific packages used by the app.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Name of the package dependency, for example Express or React."
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "One-line description of the dependency.",
+                                }
+                            },
+                            "required": ["name", "description"],
+                        },
+                    },
+                },
+                "required": ["architecture", "system_dependencies", "package_dependencies"],
+            },
+        },
     ],
     'functions': {
         'process_technologies': lambda technologies: technologies
@@ -200,32 +257,51 @@ IMPLEMENT_TASK = {
                             'properties': {
                                 'type': {
                                     'type': 'string',
-                                    'enum': ['command', 'code_change', 'human_intervention'],
+                                    'enum': ['command', 'save_file', 'modify_file', 'human_intervention'],
                                     'description': 'Type of the development step that needs to be done to complete the entire task.',
                                 },
                                 'command': command_definition(),
-                                'code_change': {
+                                'save_file': {
                                     'type': 'object',
-                                    'description': 'A code change that needs to be implemented. This should be used only if the task is of a type "code_change".',
+                                    'description': 'A file that needs to be created or file that needs to be completely replaced. This should be used for new files.',
                                     'properties': {
                                         'name': {
                                             'type': 'string',
-                                            'description': 'Name of the file that needs to be implemented.',
+                                            'description': 'Name of the file that needs to be created or replaced.',
                                         },
                                         'path': {
                                             'type': 'string',
-                                            'description': 'Full path of the file with the file name that needs to be implemented.',
+                                            'description': 'Full path of the file (with the file name) that needs to be created or replaced.',
                                         },
                                         'content': {
                                             'type': 'string',
-                                            'description': 'Full content of the file that needs to be implemented. **IMPORTANT**When you want to add a comment that tells the user to add the previous implementation at that place, make sure that the comment starts with `[OLD CODE]` and add a description of what old code should be inserted here. For example, `[OLD CODE] Login route`.',
+                                            'description': 'Full content of the file that needs to be implemented. Remember, you MUST NOT omit any of the content that should go into this file.',
                                         },
                                     },
                                     'required': ['name', 'path', 'content'],
                                 },
+                                'modify_file': {
+                                    'type': 'object',
+                                    'description': 'A file that should be modified. This should only be used for existing files.',
+                                    'properties': {
+                                        'name': {
+                                            'type': 'string',
+                                            'description': 'Name of the existing file that needs to be updated.',
+                                        },
+                                        'path': {
+                                            'type': 'string',
+                                            'description': 'Full path of the file with the file name that needs to be updated.',
+                                        },
+                                        'code_change_description': {
+                                            'type': 'string',
+                                            'description': 'Detailed description, with code snippets and any relevant context/explanation, of the changes that the developer should do.',
+                                        },
+                                    },
+                                    'required': ['name', 'path', 'code_change_description'],
+                                },
                                 'human_intervention_description': {
                                     'type': 'string',
-                                    'description': 'Description of a step in debugging this issue when there is a human intervention needed. This should be used only if the task is of a type "human_intervention".',
+                                    'description': 'Description of what a human needs to do to debug this issue. This should be used only if the task is of a type "human_intervention".',
                                 },
                             },
                             'required': ['type'],
@@ -382,22 +458,18 @@ DEVELOPMENT_PLAN = {
                     "description": 'List of development tasks that need to be done to implement the entire plan.',
                     "items": {
                         "type": "object",
-                        'description': 'Development task that needs to be done to implement the entire plan.',
+                        'description': 'Development task that needs to be done to implement the entire plan. It contains all details that developer who is not familiar with project needs to know to implement the task.',
                         'properties': {
                             'description': {
                                 'type': 'string',
-                                'description': 'Description of the development task that needs to be done to implement the entire plan.',
-                            },
-                            'programmatic_goal': {
-                                'type': 'string',
-                                'description': 'Detailed description of programmatic goal. Programmatic goal that will determine if a task can be marked as done from a programmatic perspective (this will result in an automated test that is run before the task is sent to you for a review). All details previously specified by user that are important for this task must be included in this programmatic goal.',
+                                'description': 'Very detailed description of the development task that needs to be done to implement the entire plan.',
                             },
                             'user_review_goal': {
                                 'type': 'string',
                                 'description': 'User review goal that will determine if a task is done or not, but from a user perspective since it will be reviewed by a human.',
                             }
                         },
-                        'required': ['description', 'programmatic_goal', 'user_review_goal'],
+                        'required': ['description', 'user_review_goal'],
                     },
                 },
             },
@@ -431,74 +503,25 @@ EXECUTE_COMMANDS = {
     }
 }
 
-GET_FILES = {
+GET_FILE_TO_MODIFY = {
     'definitions': [{
-        'name': 'get_files',
-        'description': 'Returns development files that are currently implemented so that they can be analized and so that changes can be appropriatelly made.',
+        'name': 'get_file_to_modify',
+        'description': 'File that needs to be modified.',
         'parameters': {
             'type': 'object',
             'properties': {
-                'files': {
-                    'type': 'array',
-                    'description': 'List of files that need to be analized to implement the reqired changes. Any file name in this array MUST be from the directory tree listed in the previous message.',
-                    'items': {
-                        'type': 'string',
-                        'description': 'A single file name that needs to be analized to implement the reqired changes. Remember, this is a file name with path relative to the project root. For example, if a file path is `{{project_root}}/models/model.py`, this value needs to be `models/model.py`. This file name MUST be listed in the directory from the previous message.',
-                    }
+                'file': {
+                    'type': 'string',
+                    'description': 'Path to the file that needs to be modified, relative to the project root.',
                 }
-            },
-            'required': ['files'],
-        },
+            }
+        }
     }],
     'functions': {
-        'get_files': lambda files: files
+        'get_file_to_modify': lambda file: file
     }
 }
 
-IMPLEMENT_CHANGES = {
-    'definitions': [{
-        'name': 'save_files',
-        'description': 'Iterates over the files passed to this function and saves them on the disk.',
-        'parameters': {
-            'type': 'object',
-            'properties': {
-                'files': {
-                    'type': 'array',
-                    'description': 'List of files that need to be saved.',
-                    'items': {
-                        'type': 'object',
-                        'properties': {
-                            'name': {
-                                'type': 'string',
-                                'description': 'Name of the file that needs to be saved on the disk.',
-                            },
-                            'path': {
-                                'type': 'string',
-                                'description': 'Full path of the file with the file name that needs to be saved.',
-                            },
-                            'content': {
-                                'type': 'string',
-                                'description': 'Full content of the file that needs to be saved on the disk. **IMPORTANT**When you want to add a comment that tells the user to add the previous implementation at that place, make sure that the comment starts with `[OLD CODE]` and add a description of what old code should be inserted here. For example, `[OLD CODE] Login route`.',
-                            },
-                            'description': {
-                                'type': 'string',
-                                'description': 'Description of the file that needs to be saved on the disk. This description doesn\'t need to explain what is being done currently in this task but rather what is the idea behind this file - what do we want to put in this file in the future. Write the description ONLY if this is the first time this file is being saved. If this file already exists on the disk, leave this field empty.',
-                            },
-                        },
-                        'required': ['name', 'path', 'content'],
-                    }
-                }
-            },
-            'required': ['files'],
-        },
-    }],
-    'functions': {
-        'save_files': lambda files: files
-    },
-    'to_message': lambda files: [
-        f'File `{file["name"]}` saved to the disk and currently looks like this:\n```\n{file["content"]}\n```' for file
-        in files]
-}
 
 GET_TEST_TYPE = {
     'definitions': [{
@@ -626,27 +649,6 @@ GET_MISSING_SNIPPETS = {
     }],
 }
 
-GET_FULLY_CODED_FILE = {
-    'definitions': [{
-        'name': 'get_fully_coded_file',
-        'description': 'Gets the fully coded file.',
-        'parameters': {
-            'type': 'object',
-            'properties': {
-                'file_content': {
-                    'type': 'string',
-                    'description': 'Fully coded file. This contains only the lines of code and no other text.',
-                }
-            },
-            'required': ['file_content'],
-        },
-    }],
-    'functions': {
-        'get_fully_coded_file': lambda file: file
-    },
-}
-
-
 GET_DOCUMENTATION_FILE = {
     'definitions': [{
         'name': 'get_documentation_file',
@@ -664,7 +666,7 @@ GET_DOCUMENTATION_FILE = {
                 },
                 'content': {
                     'type': 'string',
-                    'description': 'Full content of the documentation file that needs to be saved on the disk. **IMPORTANT**When you want to add a comment that tells the user to add the previous implementation at that place, make sure that the comment starts with `[OLD CODE]` and add a description of what old code should be inserted here. For example, `[OLD CODE] Login route`.',
+                    'description': 'Full content of the documentation file that needs to be saved on the disk.',
                 },
             },
             'required': ['name', 'path', 'content'],

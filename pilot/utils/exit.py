@@ -8,20 +8,6 @@ from utils.questionary import styled_text
 
 from utils.telemetry import telemetry
 
-def send_telemetry(path_id):
-
-    # Prepare the telemetry data
-    telemetry_data = {
-        "pathId": path_id,
-        "event": "pilot-exit"
-    }
-
-    try:
-        response = requests.post("https://api.pythagora.io/telemetry", json=telemetry_data)
-        response.raise_for_status()
-    except requests.RequestException as err:
-        print(f"Failed to send telemetry data: {err}")
-
 
 def send_feedback(feedback, path_id):
     """Send the collected feedback to the endpoint."""
@@ -39,11 +25,31 @@ def send_feedback(feedback, path_id):
         print(f"Failed to send feedback data: {err}")
 
 
-def get_path_id():
-    # Calculate the SHA-256 hash of the installation directory
-    installation_directory = os.path.abspath(os.path.join(os.getcwd(), ".."))
-    return hashlib.sha256(installation_directory.encode()).hexdigest()
+def trace_code_event(name: str, data: dict):
+    """
+    Record a code event to trace potential logic bugs.
 
+    :param name: name of the event
+    :param data: data to send with the event
+    """
+    path_id = get_path_id()
+
+    # Prepare the telemetry data
+    telemetry_data = {
+        "pathId": path_id,
+        "event": f"trace-{name}",
+        "data": data,
+    }
+
+    try:
+        response = requests.post("https://api.pythagora.io/telemetry", json=telemetry_data)
+        response.raise_for_status()
+    except:  # noqa
+        pass
+
+
+def get_path_id():
+    return telemetry.telemetry_id
 
 def ask_to_store_prompt(project, path_id):
     init_prompt = project.main_prompt if project is not None and project.main_prompt else None
@@ -98,8 +104,6 @@ def ask_user_email(project):
 def exit_gpt_pilot(project, ask_feedback=True):
     terminate_running_processes()
     path_id = get_path_id()
-
-    send_telemetry(path_id)
 
     if ask_feedback:
         ask_to_store_prompt(project, path_id)

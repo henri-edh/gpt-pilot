@@ -37,16 +37,11 @@ class TechnicalWriter(Agent):
             "clarifications": self.project.clarifications,
             "user_stories": self.project.user_stories,
             "user_tasks": self.project.user_tasks,
-            "technologies": self.project.architecture,
             "directory_tree": self.project.get_directory_tree(True),
             "files": self.project.get_all_coded_files(),
         }, GET_DOCUMENTATION_FILE)
 
-        changes = self.project.developer.replace_old_code_comments([llm_response])
-
-        for file_data in changes:
-            self.project.save_file(file_data)
-
+        self.project.save_file(llm_response)
         return convo
 
     def create_api_documentation(self):

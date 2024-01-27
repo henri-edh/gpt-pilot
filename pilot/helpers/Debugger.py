@@ -5,6 +5,7 @@ import re
 from const.code_execution import MAX_COMMAND_DEBUG_TRIES, MAX_RECUSION_LAYER
 from const.function_calls import DEBUG_STEPS_BREAKDOWN
 from const.messages import AFFIRMATIVE_ANSWERS, NEGATIVE_ANSWERS
+from helpers.AgentConvo import AgentConvo
 from helpers.exceptions.TokenLimitError import TokenLimitError
 from helpers.exceptions.TooDeepRecursionError import TooDeepRecursionError
 from logger.logger import logger
@@ -33,6 +34,7 @@ class Debugger:
         """
         logger.info('Debugging %s', command)
         self.recursion_layer += 1
+        self.agent.project.current_task.add_debugging_task(self.recursion_layer, command, user_input, issue_description)
         if self.recursion_layer > MAX_RECUSION_LAYER:
             self.recursion_layer = 0
             raise TooDeepRecursionError()
@@ -52,14 +54,14 @@ class Debugger:
                     return True
                 if answer and answer.lower() not in AFFIRMATIVE_ANSWERS:
                     user_input = answer
+                    self.agent.project.current_task.add_user_input_to_debugging_task(user_input)
 
             llm_response = convo.send_message('dev_ops/debug.prompt',
                 {
                     'command': command['command'] if command is not None else None,
                     'user_input': user_input,
                     'issue_description': issue_description,
-                    'os': platform.system(),
-                    'context': convo.to_context_prompt()
+                    'os': platform.system()
                 },
                 DEBUG_STEPS_BREAKDOWN)
 
@@ -106,7 +108,7 @@ class Debugger:
                                 user_input = result['cli_response']
                                 convo.messages[-2]['content'] = re.sub(
                                     r'(?<=The output was:\n\n).*?(?=\n\nThink about this output)',
-                                    result['cli_response'],
+                                    AgentConvo.escape_specials(result['cli_response']),
                                     convo.messages[-2]['content'],
                                     flags=re.DOTALL
                                 )

@@ -4,9 +4,11 @@ from pathlib import Path
 import re
 from typing import Tuple
 
+import peewee
+
 from const.messages import CHECK_AND_CONTINUE, AFFIRMATIVE_ANSWERS, NEGATIVE_ANSWERS
 from utils.style import color_yellow_bold, color_cyan, color_white_bold, color_green
-from const.common import IGNORE_FOLDERS, STEPS
+from const.common import STEPS
 from database.database import delete_unconnected_steps_from, delete_all_app_development_data, update_app_status
 from const.ipc import MESSAGE_TYPE
 from prompts.prompts import ask_user
@@ -25,13 +27,19 @@ from database.models.file_snapshot import FileSnapshot
 from database.models.files import File
 from logger.logger import logger
 from utils.dot_gpt_pilot import DotGptPilot
+from utils.llm_connection import test_api_access
+from utils.ignore import IgnoreMatcher
 
 from utils.telemetry import telemetry
+from utils.task import Task
 
 class Project:
-    def __init__(self, args, name=None, project_description=None, clarifications=None, user_stories=None,
-                 user_tasks=None, architecture=None, development_plan=None, current_step=None, ipc_client_instance=None,
-                 enable_dot_pilot_gpt=True):
+    def __init__(
+        self,
+        args,
+        *,
+        ipc_client_instance=None,
+    ):
         """
         Initialize a project.
 
@@ -49,6 +57,7 @@ class Project:
         self.llm_req_num = 0
         self.command_runs_count = 0
         self.user_inputs_count = 0
+        self.current_task = Task()
         self.checkpoints = {
             'last_user_input': None,
             'last_command_run': None,
@@ -67,15 +76,20 @@ class Project:
         # self.restore_files({dev_step_id_to_start_from})
 
         self.finished = False
-        self.current_step = current_step
-        self.name = name
-        self.project_description = project_description
-        self.clarifications = clarifications
-        self.user_stories = user_stories
-        self.user_tasks = user_tasks
-        self.architecture = architecture
-        self.development_plan = development_plan
-        self.dot_pilot_gpt = DotGptPilot(log_chat_completions=enable_dot_pilot_gpt)
+        self.current_step = None
+        self.name = None
+        self.project_description = None
+        self.clarifications = None
+        self.user_stories = None
+        self.user_tasks = None
+        self.architecture = None
+        self.system_dependencies = None
+        self.package_dependencies = None
+        self.development_plan = None
+        self.dot_pilot_gpt = DotGptPilot(log_chat_completions=True)
+
+        if os.getenv("AUTOFIX_FILE_PATHS", "").lower() in ["true", "1", "yes"]:
+            File.update_paths()
 
     def set_root_path(self, root_path: str):
         self.root_path = root_path
@@ -85,7 +99,13 @@ class Project:
         """
         Start the project.
         """
+
         telemetry.start()
+        telemetry.set("app_id", self.args["app_id"])
+
+        if not test_api_access(self):
+            return False
+
         self.project_manager = ProductOwner(self)
         self.project_manager.get_project_description()
 
@@ -102,6 +122,11 @@ class Project:
         self.tech_lead = TechLead(self)
         self.tech_lead.create_development_plan()
 
+        telemetry.set("architecture", {
+            "description": self.architecture,
+            "system_dependencies": self.system_dependencies,
+            "package_dependencies": self.package_dependencies,
+        })
         # TODO move to constructor eventually
         if self.args['step'] is not None and STEPS.index(self.args['step']) < STEPS.index('coding'):
             clear_directory(self.root_path)
@@ -139,6 +164,7 @@ class Project:
             "project_stage": "coding"
         }), type='info')
         self.developer.start_coding()
+        return True
 
     def finish(self):
         """
@@ -166,12 +192,7 @@ class Project:
         Returns:
             dict: The directory tree.
         """
-        # files = {}
-        # if with_descriptions and False:
-        #     files = File.select().where(File.app_id == self.args['app_id'])
-        #     files = {snapshot.name: snapshot for snapshot in files}
-        # return build_directory_tree_with_descriptions(self.root_path, ignore=IGNORE_FOLDERS, files=files, add_descriptions=False)
-        return build_directory_tree(self.root_path, ignore=IGNORE_FOLDERS)
+        return build_directory_tree(self.root_path)
 
     def get_test_directory_tree(self):
         """
@@ -181,7 +202,7 @@ class Project:
             dict: The directory tree of tests.
         """
         # TODO remove hardcoded path
-        return build_directory_tree(self.root_path + '/tests', ignore=IGNORE_FOLDERS)
+        return build_directory_tree(self.root_path + '/tests')
 
     def get_all_coded_files(self):
         """
@@ -190,24 +211,16 @@ class Project:
         Returns:
             list: A list of coded files.
         """
-        files = File.select().where(File.app_id == self.args['app_id'])
+        files = (
+            File
+                .select()
+                .where(
+                    (File.app_id == self.args['app_id']) &
+                    peewee.fn.EXISTS(FileSnapshot.select().where(FileSnapshot.file_id == File.id))
+                )
+            )
 
-        # TODO temoprary fix to eliminate files that are not in the project
-        files = [file for file in files if len(FileSnapshot.select().where(FileSnapshot.file_id == file.id)) > 0]
-        # TODO END
-
-        files = self.get_files([file.path + '/' + file.name for file in files])
-
-        # Don't send contents of binary files
-        for file in files:
-            if not isinstance(file["content"], str):
-                file["content"] = f"<<binary file, {len(file['content'])} bytes>>"
-
-        # TODO temoprary fix to eliminate files that are not in the project
-        files = [file for file in files if file['content'] != '']
-        # TODO END
-
-        return files
+        return self.get_files([file.path + '/' + file.name for file in files])
 
     def get_files(self, files):
         """
@@ -219,6 +232,7 @@ class Project:
         Returns:
             list: A list of files with content.
         """
+        matcher = IgnoreMatcher(root_path=self.root_path)
         files_with_content = []
         for file_path in files:
             try:
@@ -226,9 +240,12 @@ class Project:
                 _, full_path = self.get_full_file_path(file_path, file_path)
                 file_data = get_file_contents(full_path, self.root_path)
             except ValueError:
-                file_data = {"path": file_path, "content": ''}
+                full_path = None
+                file_data = {"path": file_path, "name": os.path.basename(file_path), "content": ''}
 
-            files_with_content.append(file_data)
+            if full_path and file_data["content"] != "" and not matcher.ignore(full_path):
+                files_with_content.append(file_data)
+
         return files_with_content
 
     def find_input_required_lines(self, file_content):
@@ -382,8 +399,11 @@ class Project:
 
 
     def save_files_snapshot(self, development_step_id):
-        files = get_directory_contents(self.root_path, ignore=IGNORE_FOLDERS)
+        files = get_directory_contents(self.root_path)
         development_step, created = DevelopmentSteps.get_or_create(id=development_step_id)
+
+        total_files = 0
+        total_lines = 0
 
         for file in files:
             if not self.check_ipc():
@@ -404,12 +424,18 @@ class Project:
             )
             file_snapshot.content = file['content']
             file_snapshot.save()
+            total_files += 1
+            if isinstance(file['content'], str):
+                total_lines += file['content'].count('\n') + 1
+
+        telemetry.set("num_files", total_files)
+        telemetry.set("num_lines", total_lines)
 
     def restore_files(self, development_step_id):
         development_step = DevelopmentSteps.get(DevelopmentSteps.id == development_step_id)
         file_snapshots = FileSnapshot.select().where(FileSnapshot.development_step == development_step)
 
-        clear_directory(self.root_path, IGNORE_FOLDERS + self.files)
+        clear_directory(self.root_path, ignore=self.files)
         for file_snapshot in file_snapshots:
             update_file(file_snapshot.file.full_path, file_snapshot.content, project=self)
             if file_snapshot.file.full_path not in self.files:
@@ -459,6 +485,12 @@ class Project:
             print(text)
 
     def check_ipc(self):
+        """
+        Checks if there is an open Inter-Process Communication (IPC) connection.
+
+        Returns:
+            bool: True if there is an open IPC connection, False otherwise.
+        """
         return self.ipc_client_instance is not None and self.ipc_client_instance.client is not None
 
     def finish_loading(self):

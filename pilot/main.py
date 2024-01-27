@@ -1,11 +1,16 @@
 # main.py
-from __future__ import print_function, unicode_literals
 import builtins
+import json
 import os
 
 import sys
 import traceback
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    raise RuntimeError('Python environment for GPT Pilot is not completely set up: required package "python-dotenv" is missing.') from None
+
 load_dotenv()
 
 from utils.style import color_red
@@ -18,6 +23,7 @@ from database.database import database_exists, create_database, tables_exist, cr
 
 from utils.settings import settings, loader
 from utils.telemetry import telemetry
+
 
 def init():
     # Check if the "euclid" database exists, if not, create it
@@ -39,15 +45,19 @@ if __name__ == "__main__":
     ask_feedback = True
     project = None
     run_exit_fn = True
+
+    args = init()
+
     try:
         # sys.argv.append('--ux-test=' + 'continue_development')
-
-        args = init()
 
         builtins.print, ipc_client_instance = get_custom_print(args)
 
         if '--api-key' in args:
             os.environ["OPENAI_API_KEY"] = args['--api-key']
+        if '--api-endpoint' in args:
+            os.environ["OPENAI_ENDPOINT"] = args['--api-endpoint']
+
         if '--get-created-apps-with-steps' in args:
             run_exit_fn = False
 
@@ -73,22 +83,42 @@ if __name__ == "__main__":
             if args.get("app_id"):
                 telemetry.set("is_continuation", True)
 
+            if "email" in args:
+                telemetry.set("user_contact", args["email"])
+
+            if "extension_version" in args:
+                telemetry.set("extension_version", args["extension_version"])
+
             # TODO get checkpoint from database and fill the project with it
             project = Project(args, ipc_client_instance=ipc_client_instance)
             if project.check_ipc():
                 telemetry.set("is_extension", True)
 
-            project.start()
-            project.finish()
-            telemetry.set("end_result", "success")
+            started = project.start()
+            if started:
+                project.finish()
+                telemetry.set("end_result", "success:exit")
+            else:
+                run_exit_fn = False
+                telemetry.set("end_result", "failure:api-error")
+                print('Exit', type='exit')
+
+    except KeyboardInterrupt:
+        telemetry.set("end_result", "interrupt")
+        if project.check_ipc():
+            telemetry.send()
+            run_exit_fn = False
+
     except Exception as err:
-        telemetry.record_crash(err)
         print(color_red('---------- GPT PILOT EXITING WITH ERROR ----------'))
         traceback.print_exc()
         print(color_red('--------------------------------------------------'))
         ask_feedback = False
-        telemetry.set("end_result", "failure")
+        telemetry.record_crash(err)
+
     finally:
+        if project is not None:
+            project.current_task.exit()
+            project.finish_loading()
         if run_exit_fn:
             exit_gpt_pilot(project, ask_feedback)
-        sys.exit(0)
