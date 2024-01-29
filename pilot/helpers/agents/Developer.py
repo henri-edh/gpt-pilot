@@ -12,9 +12,9 @@ from utils.style import (
     color_cyan_bold,
     color_white_bold
 )
-from helpers.exceptions.TokenLimitError import TokenLimitError
+from helpers.exceptions import TokenLimitError
 from const.code_execution import MAX_COMMAND_DEBUG_TRIES
-from helpers.exceptions.TooDeepRecursionError import TooDeepRecursionError
+from helpers.exceptions import TooDeepRecursionError
 from helpers.Debugger import Debugger
 from utils.questionary import styled_text
 from utils.utils import step_already_finished
@@ -24,9 +24,8 @@ from helpers.Agent import Agent
 from helpers.AgentConvo import AgentConvo
 from utils.utils import should_execute_step, array_of_objects_to_string, generate_app_data
 from helpers.cli import run_command_until_success, execute_command_and_check_cli_response, running_processes
-from const.function_calls import FILTER_OS_TECHNOLOGIES, EXECUTE_COMMANDS, GET_TEST_TYPE, IMPLEMENT_TASK, COMMAND_TO_RUN
+from const.function_calls import EXECUTE_COMMANDS, GET_TEST_TYPE, IMPLEMENT_TASK, COMMAND_TO_RUN
 from database.database import save_progress, get_progress_steps, update_app_status
-from utils.utils import get_os_info
 from utils.telemetry import telemetry
 
 ENVIRONMENT_SETUP_STEP = 'environment_setup'
@@ -108,6 +107,8 @@ class Developer(Agent):
             "current_task_index": i,
             "development_tasks": self.project.development_plan,
             "files": self.project.get_all_coded_files(),
+            "architecture": self.project.architecture,
+            "technologies": self.project.system_dependencies + self.project.package_dependencies,
             "task_type": 'feature' if self.project.finished else 'app'
         })
 
@@ -492,10 +493,6 @@ class Developer(Agent):
 
             if user_feedback is not None:
                 iteration_convo = AgentConvo(self)
-                technologies = (
-                    [dep["name"] for dep in self.project.system_dependencies] +
-                    [dep["name"] for dep in self.project.package_dependencies]
-                )
                 iteration_description = iteration_convo.send_message('development/iteration.prompt', {
                     "name": self.project.args['name'],
                     "app_type": self.project.args['app_type'],
@@ -503,7 +500,8 @@ class Developer(Agent):
                     "clarifications": self.project.clarifications,
                     "user_stories": self.project.user_stories,
                     "user_tasks": self.project.user_tasks,
-                    "technologies": technologies,
+                    "architecture": self.project.architecture,
+                    "technologies": self.project.system_dependencies + self.project.package_dependencies,
                     "array_of_objects_to_string": array_of_objects_to_string,  # TODO check why is this here
                     "directory_tree": self.project.get_directory_tree(True),
                     "current_task": development_task,

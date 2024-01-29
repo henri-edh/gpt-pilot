@@ -12,7 +12,7 @@ from const.common import STEPS
 from database.database import delete_unconnected_steps_from, delete_all_app_development_data, update_app_status
 from const.ipc import MESSAGE_TYPE
 from prompts.prompts import ask_user
-from helpers.exceptions.TokenLimitError import TokenLimitError
+from helpers.exceptions import TokenLimitError
 from utils.questionary import styled_text
 from helpers.files import get_directory_contents, get_file_contents, clear_directory, update_file
 from helpers.cli import build_directory_tree
@@ -82,9 +82,9 @@ class Project:
         self.clarifications = None
         self.user_stories = None
         self.user_tasks = None
-        self.architecture = None
-        self.system_dependencies = None
-        self.package_dependencies = None
+        self.architecture = ""
+        self.system_dependencies = []
+        self.package_dependencies = []
         self.development_plan = None
         self.dot_pilot_gpt = DotGptPilot(log_chat_completions=True)
 
