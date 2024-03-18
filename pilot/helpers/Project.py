@@ -4,12 +4,13 @@ from pathlib import Path
 from typing import Tuple
 
 import peewee
+from playhouse.shortcuts import model_to_dict
 
-from const.messages import CHECK_AND_CONTINUE, AFFIRMATIVE_ANSWERS, NEGATIVE_ANSWERS
+from const.messages import CHECK_AND_CONTINUE, AFFIRMATIVE_ANSWERS, NEGATIVE_ANSWERS, STUCK_IN_LOOP
 from utils.style import color_yellow_bold, color_cyan, color_white_bold, color_red_bold
 from const.common import STEPS
 from database.database import delete_unconnected_steps_from, delete_all_app_development_data, \
-    get_all_app_development_steps, delete_all_subsequent_steps
+    get_all_app_development_steps, delete_all_subsequent_steps, get_features_by_app_id
 from const.ipc import MESSAGE_TYPE
 from prompts.prompts import ask_user
 from helpers.exceptions import TokenLimitError, GracefulExit
@@ -21,6 +22,7 @@ from helpers.agents.Developer import Developer
 from helpers.agents.Architect import Architect
 from helpers.agents.ProductOwner import ProductOwner
 from helpers.agents.TechnicalWriter import TechnicalWriter
+from helpers.agents.SpecWriter import SpecWriter
 
 from database.models.development_steps import DevelopmentSteps
 from database.models.file_snapshot import FileSnapshot
@@ -32,6 +34,7 @@ from utils.ignore import IgnoreMatcher
 
 from utils.telemetry import telemetry
 from utils.task import Task
+from utils.utils import remove_lines_with_string
 
 
 class Project:
@@ -78,27 +81,28 @@ class Project:
         self.current_step = None
         self.name = None
         self.project_description = None
-        self.clarifications = None
         self.user_stories = None
         self.user_tasks = None
         self.architecture = ""
         self.system_dependencies = []
         self.package_dependencies = []
+        self.project_template = None
         self.development_plan = None
+        self.previous_features = None
+        self.current_feature = None
         self.dot_pilot_gpt = DotGptPilot(log_chat_completions=True)
 
         if os.getenv("AUTOFIX_FILE_PATHS", "").lower() in ["true", "1", "yes"]:
             File.update_paths()
 
         # start loading of project (since backwards compatibility)
-        self.should_overwrite_files = False
+        self.should_overwrite_files = None
         self.last_detailed_user_review_goal = None
         self.last_iteration = None
         self.tasks_to_load = []
         self.features_to_load = []
         self.dev_steps_to_load = []
-        if self.continuing_project:
-            self.setup_loading()
+        self.run_command = None
         # end loading of project
 
     def set_root_path(self, root_path: str):
@@ -113,22 +117,41 @@ class Project:
             return
 
         self.skip_steps = True
-        should_overwrite_files = None
-        while should_overwrite_files is None or should_overwrite_files.lower() not in AFFIRMATIVE_ANSWERS + NEGATIVE_ANSWERS:
-            print('Use GPT Pilot\'s code/Keep my changes', type='buttons-only')
-            should_overwrite_files = styled_text(
+        while self.should_overwrite_files is None:
+            changes_made_question = f'Did you make any changes to "{self.args["name"]}" project files since last time you used Pythagora?'
+            print(changes_made_question, type='ipc', category='pythagora')
+            print('yes/no', type='buttons-only')
+            # must use styled_text() instead of ask_user() here to avoid finish_loading() call
+            changes_made = styled_text(
                 self,
-                "Can GPT Pilot overwrite code changes you made since last running GPT Pilot?",
-                ignore_user_input_count=True
+                changes_made_question,
+                ignore_user_input_count=True,
             )
 
-            logger.info('should_overwrite_files: %s', should_overwrite_files)
-            if should_overwrite_files in NEGATIVE_ANSWERS:
-                self.should_overwrite_files = False
-                break
-            elif should_overwrite_files in AFFIRMATIVE_ANSWERS:
+            # if there were no changes just load files from db
+            if changes_made.lower() in NEGATIVE_ANSWERS:
                 self.should_overwrite_files = True
                 break
+            # otherwise ask user if they want to use those changes
+            elif changes_made.lower() in AFFIRMATIVE_ANSWERS:
+                use_changes_question = 'Do you want to use those changes you made?'
+                use_changes_msg = 'yes'
+                dont_use_changes_msg = 'no, restore last pythagora state'
+                print(use_changes_question, type='ipc', category='pythagora')
+                print(f'{use_changes_msg}/{dont_use_changes_msg}', type='buttons-only')
+                print(f'"{dont_use_changes_msg}" means Pythagora will restore (overwrite) all files to last stored state.\n'
+                      f'"{use_changes_msg}" means Pythagora will continue working on project using current state of files.', type='hint')
+                use_changes = styled_text(
+                    self,
+                    use_changes_question,
+                    ignore_user_input_count=True
+                )
+
+                logger.info('Use changes: %s', use_changes)
+                if use_changes.lower() in NEGATIVE_ANSWERS + [dont_use_changes_msg]:
+                    self.should_overwrite_files = True
+                elif use_changes.lower() in AFFIRMATIVE_ANSWERS + [use_changes_msg]:
+                    self.should_overwrite_files = False
 
         load_step_before_coding = ('step' in self.args and
                                    self.args['step'] is not None and
@@ -150,6 +173,9 @@ class Project:
             self.checkpoints['last_development_step'] = self.dev_steps_to_load[-1]
             self.tasks_to_load = [el for el in self.dev_steps_to_load if 'breakdown.prompt' in el.get('prompt_path', '')]
             self.features_to_load = [el for el in self.dev_steps_to_load if 'feature_plan.prompt' in el.get('prompt_path', '')]
+            self.run_command = next((el for el in reversed(self.dev_steps_to_load) if 'get_run_command.prompt' in el.get('prompt_path', '')), None)
+            if self.run_command is not None:
+                self.run_command = json.loads(self.run_command['llm_response']['text'])['command']
 
     def start(self):
         """
@@ -162,19 +188,27 @@ class Project:
         if not test_api_access(self):
             return False
 
-        self.project_manager = ProductOwner(self)
-        self.project_manager.get_project_description()
+        if self.continuing_project:
+            self.setup_loading()
 
+        self.project_manager = ProductOwner(self)
+        self.spec_writer = SpecWriter(self)
+
+        print('', type='verbose', category='agent:product-owner')
+        self.project_manager.get_project_description(self.spec_writer)
         self.project_manager.get_user_stories()
         # self.user_tasks = self.project_manager.get_user_tasks()
 
+        print('', type='verbose', category='agent:architect')
         self.architect = Architect(self)
         self.architect.get_architecture()
 
+        print('', type='verbose', category='agent:developer')
         self.developer = Developer(self)
         self.developer.set_up_environment()
         self.technical_writer = TechnicalWriter(self)
 
+        print('', type='verbose', category='agent:tech-lead')
         self.tech_lead = TechLead(self)
         self.tech_lead.create_development_plan()
 
@@ -188,7 +222,7 @@ class Project:
         print(json.dumps({
             "project_stage": "coding"
         }), type='info')
-        self.developer.start_coding()
+        self.developer.start_coding('app')
         return True
 
     def finish(self):
@@ -199,14 +233,21 @@ class Project:
             feature_description = ''
             if not self.features_to_load:
                 self.finish_loading()
+
+            self.previous_features = get_features_by_app_id(self.args['app_id'])
             if not self.skip_steps:
+                print('', type='verbose', category='pythagora')
+                if self.run_command and self.check_ipc():
+                    print(self.run_command, type='run_command')
+                print('continue', type='button')
                 feature_description = ask_user(self, "Project is finished! Do you want to add any features or changes? "
                                                      "If yes, describe it here and if no, just press ENTER",
                                                require_some_input=False)
 
-                if feature_description == '':
+                if feature_description == '' or feature_description == 'continue':
                     return
 
+                print('', type='verbose', category='agent:tech-lead')
                 self.tech_lead.create_feature_plan(feature_description)
 
             # loading of features
@@ -236,7 +277,9 @@ class Project:
                 feature_description = current_feature['prompt_data']['feature_description']
                 self.features_to_load = []
 
-            self.developer.start_coding()
+            self.current_feature = feature_description
+            self.developer.start_coding('feature')
+            print('', type='verbose', category='agent:tech-lead')
             self.tech_lead.create_feature_summary(feature_description)
 
     def get_directory_tree(self, with_descriptions=False):
@@ -260,6 +303,29 @@ class Project:
         """
         # TODO remove hardcoded path
         return build_directory_tree(self.root_path + '/tests')
+
+    def get_files_from_db_by_step_id(self, step_id):
+        """
+        Get all coded files associated with a specific step_id.
+
+        Args:
+            step_id (int): The ID of the step.
+
+        Returns:
+            list: A list of coded files associated with the step_id.
+        """
+        if step_id is None:
+            return []
+
+        file_snapshots = FileSnapshot.select().where(FileSnapshot.development_step_id == step_id)
+
+        return [{
+            "name": item['file']['name'],
+            "path": item['file']['path'],
+            "full_path": item['file']['full_path'],
+            'content': item['content'],
+            "lines_of_code": len(item['content'].splitlines()),
+        } for item in [model_to_dict(file) for file in file_snapshots]]
 
     def get_all_coded_files(self):
         """
@@ -349,13 +415,14 @@ class Project:
             inputs_required = self.find_input_required_lines(data['content'])
             for line_number, line_content in inputs_required:
                 user_input = None
+                print('', type='verbose', category='human-intervention')
                 print(color_yellow_bold(f'Input required on line {line_number}:\n{line_content}') + '\n')
                 while user_input is None or user_input.lower() not in AFFIRMATIVE_ANSWERS + ['continue']:
                     print({'path': full_path, 'line': line_number}, type='openFile')
                     print('continue', type='buttons-only')
                     user_input = ask_user(
                         self,
-                        f'Please open the file {data["path"]} on the line {line_number} and add the required input. Once you\'re done, type "y" to continue.',
+                        f'Please open the file {data["path"]} on the line {line_number} and add the required input. Please, also remove "// INPUT_REQUIRED" comment and once you\'re done, press "continue".',
                         require_some_input=False,
                         ignore_user_input_count=True
                     )
@@ -416,8 +483,14 @@ class Project:
             # - /pilot -> /pilot/
             # - \pilot\server.js -> \pilot\server.js
             # - \pilot -> \pilot\
+            KNOWN_FILES = ["makefile", "dockerfile", "procfile", "readme", "license", "podfile", "gemfile"]  # known exceptions that break the heuristic
+            KNOWN_DIRS = []  # known exceptions that break the heuristic
             base = os.path.basename(path)
-            if base and "." not in base:
+            if (
+                base
+                and ("." not in base or base.lower() in KNOWN_DIRS)
+                and base.lower() not in KNOWN_FILES
+            ):
                 path += os.path.sep
 
             # In case we're in Windows and dealing with full paths, remove the drive letter.
@@ -471,7 +544,7 @@ class Project:
                 app=self.app,
                 name=file['name'],
                 path=file['path'],
-                full_path=file['full_path'],
+                defaults={'full_path': file['full_path']},
             )
 
             file_snapshot, created = FileSnapshot.get_or_create(
@@ -495,7 +568,10 @@ class Project:
 
         clear_directory(self.root_path, ignore=self.files)
         for file_snapshot in file_snapshots:
-            update_file(file_snapshot.file.full_path, file_snapshot.content, project=self)
+            try:
+                update_file(file_snapshot.file.full_path, file_snapshot.content, project=self)
+            except (PermissionError, NotADirectoryError) as err:  # noqa
+                print(f"Error restoring file {file_snapshot.file.full_path}: {err}")
             if file_snapshot.file.full_path not in self.files:
                 self.files.append(file_snapshot.file.full_path)
 
@@ -504,7 +580,9 @@ class Project:
         delete_unconnected_steps_from(self.checkpoints['last_command_run'], 'previous_step')
         delete_unconnected_steps_from(self.checkpoints['last_user_input'], 'previous_step')
 
-    def ask_for_human_intervention(self, message, description=None, cbs={}, convo=None, is_root_task=False):
+    def ask_for_human_intervention(self, message, description=None, cbs={}, convo=None, is_root_task=False,
+                                   add_loop_button=False, category='human-intervention'):
+        print('', type='verbose', category=category)
         answer = ''
         question = color_yellow_bold(message)
 
@@ -514,7 +592,7 @@ class Project:
         reset_branch_id = None if convo is None else convo.save_branch()
 
         while answer.lower() != 'continue':
-            print('continue', type='button')
+            print('continue' + (f'/{STUCK_IN_LOOP}' if add_loop_button else ''), type='button')
             answer = ask_user(self, CHECK_AND_CONTINUE,
                               require_some_input=False,
                               hint=question)
@@ -590,3 +668,11 @@ class Project:
 
         # Keep only the elements from that index onwards
         setattr(self, list_name, new_list)
+
+    def remove_debugging_logs_from_all_files(self):
+        project_files = self.get_all_coded_files()
+        for file in project_files:
+            if 'gpt_pilot_debugging_log' in file['content'].lower():
+                # remove all lines that contain 'debugging_log'
+                file['content'] = remove_lines_with_string(file['content'], 'gpt_pilot_debugging_log')
+                self.save_file(file)

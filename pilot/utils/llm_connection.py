@@ -5,11 +5,10 @@ import sys
 import time
 import json
 import tiktoken
-from traceback import format_exc
 from prompt_toolkit.styles import Style
 
 from jsonschema import validate, ValidationError
-from utils.style import color_red
+from utils.style import color_red, color_yellow
 from typing import List
 from const.llm import MAX_GPT_MODEL_TOKENS, API_CONNECT_TIMEOUT, API_READ_TIMEOUT
 from const.messages import AFFIRMATIVE_ANSWERS
@@ -92,19 +91,19 @@ def test_api_access(project) -> bool:
 
 
 def create_gpt_chat_completion(messages: List[dict], req_type, project,
-                               function_calls: FunctionCallSet = None):
+                               function_calls: FunctionCallSet = None,
+                               prompt_data: dict = None,
+                               temperature: float = 0.7):
     """
     Called from:
       - AgentConvo.send_message() - these calls often have `function_calls`, usually from `pilot/const/function_calls.py`
          - convo.continuous_conversation()
-      - prompts.get_additional_info_from_openai()
-      - prompts.get_additional_info_from_user() after the user responds to each
-            "Please check this message and say what needs to be changed... {message}"
     :param messages: [{ "role": "system"|"assistant"|"user", "content": string }, ... ]
     :param req_type: 'project_description' etc. See common.STEPS
     :param project: project
     :param function_calls: (optional) {'definitions': [{ 'name': str }, ...]}
         see `IMPLEMENT_CHANGES` etc. in `pilot/const/function_calls.py`
+    :param prompt_data: (optional) { 'prompt': str, 'variables': { 'variable_name': 'variable_value', ... } }
     :return: {'text': new_code}
         or if `function_calls` param provided
              {'function_calls': {'name': str, arguments: {...}}}
@@ -113,7 +112,7 @@ def create_gpt_chat_completion(messages: List[dict], req_type, project,
     gpt_data = {
         'model': os.getenv('MODEL_NAME', 'gpt-4'),
         'n': 1,
-        'temperature': 1,
+        'temperature': temperature,
         'top_p': 1,
         'presence_penalty': 0,
         'frequency_penalty': 0,
@@ -130,7 +129,9 @@ def create_gpt_chat_completion(messages: List[dict], req_type, project,
 
     # Advise the LLM of the JSON response schema we are expecting
     messages_length = len(messages)
-    add_function_calls_to_request(gpt_data, function_calls)
+    function_call_message = add_function_calls_to_request(gpt_data, function_calls)
+    if prompt_data is not None and function_call_message is not None:
+        prompt_data['function_call_message'] = function_call_message
 
     try:
         response = stream_gpt_completion(gpt_data, req_type, project)
@@ -147,7 +148,7 @@ def create_gpt_chat_completion(messages: List[dict], req_type, project,
         if isinstance(e, ApiError):
             raise e
         else:
-            raise ApiError("Error making LLM API request: {e}") from e
+            raise ApiError(f"Error making LLM API request: {e}") from e
 
 def delete_last_n_lines(n):
     for _ in range(n):
@@ -174,11 +175,14 @@ def get_tokens_in_messages_from_openai_error(error_message):
     """
 
     match = re.search(r"your messages resulted in (\d+) tokens", error_message)
-
     if match:
         return int(match.group(1))
-    else:
-        return None
+
+    match = re.search(r"Requested (\d+). The input or output tokens must be reduced", error_message)
+    if match:
+        return int(match.group(1))
+
+    return None
 
 
 def retry_on_exception(func):
@@ -195,8 +199,6 @@ def retry_on_exception(func):
             del args[0]['function_buffer']
 
     def wrapper(*args, **kwargs):
-        wait_duration_ms = None
-
         while True:
             try:
                 # spinner_stop(spinner)
@@ -244,24 +246,15 @@ def retry_on_exception(func):
                     # Attempt retry if the JSON schema is invalid, but avoid getting stuck in a loop
                     if function_error_count < 3:
                         continue
-                if "context_length_exceeded" in err_str:
+                if "context_length_exceeded" in err_str or "Request too large" in err_str:
                     # If the specific error "context_length_exceeded" is present, simply return without retry
                     # spinner_stop(spinner)
                     n_tokens = get_tokens_in_messages_from_openai_error(err_str)
                     print(color_red(f"Error calling LLM API: The request exceeded the maximum token limit (request size: {n_tokens}) tokens."))
+                    trace_token_limit_error(n_tokens, args[0]['messages'], err_str)
                     raise TokenLimitError(n_tokens, MAX_GPT_MODEL_TOKENS)
                 if "rate_limit_exceeded" in err_str:
-                    # Extracting the duration from the error string
-                    match = re.search(r"Please try again in (\d+)ms.", err_str)
-                    if match:
-                        # spinner = spinner_start(colored("Rate limited. Waiting...", 'yellow'))
-                        if wait_duration_ms is None:
-                            wait_duration_ms = int(match.group(1))
-                        elif wait_duration_ms < 6000:
-                            # waiting 6ms isn't usually long enough - exponential back-off until about 6 seconds
-                            wait_duration_ms *= 2
-                        logger.debug(f'Rate limited. Waiting {wait_duration_ms}ms...')
-                        time.sleep(wait_duration_ms / 1000)
+                    rate_limit_exceeded_sleep(e, err_str)
                     continue
 
                 print(color_red('There was a problem with request to openai API:'))
@@ -289,6 +282,69 @@ def retry_on_exception(func):
                         raise ApiError(f"Error making LLM API request: {err_str}") from e
 
     return wrapper
+
+
+def rate_limit_exceeded_sleep(e, err_str):
+    extra_buffer_time = float(os.getenv('RATE_LIMIT_EXTRA_BUFFER', 6))  # extra buffer time to wait, defaults to 6 secs
+    wait_duration_sec = extra_buffer_time  # Default time to wait in seconds
+
+    # Regular expression to find milliseconds
+    match = re.search(r'Please try again in (\d+)ms.', err_str)
+    if match:
+        milliseconds = int(match.group(1))
+        wait_duration_sec += milliseconds / 1000
+    else:
+        # Regular expression to find minutes and seconds
+        match = re.search(r'Please try again in (\d+)m(\d+\.\d+)s.', err_str)
+        if match:
+            minutes = int(match.group(1))
+            seconds = float(match.group(2))
+            wait_duration_sec += minutes * 60 + seconds
+        else:
+            # Check for only seconds
+            match = re.search(r'(\d+\.\d+)s.', err_str)
+            if match:
+                seconds = float(match.group(1))
+                wait_duration_sec += seconds
+
+    logger.debug(f'Rate limited. Waiting {wait_duration_sec} seconds...')
+
+    if isinstance(e, ApiError) and hasattr(e, "response_json") and e.response_json is not None and "error" in e.response_json:
+        message = e.response_json["error"]["message"]
+    else:
+        message = "Rate limited by the API (we're over 'tokens per minute' or 'requests per minute' limit)"
+    print(color_yellow(message))
+    print(color_yellow(f"Retrying in {wait_duration_sec} second(s)... with extra buffer of: {extra_buffer_time} second(s)"))
+    time.sleep(wait_duration_sec)
+
+
+def trace_token_limit_error(request_tokens: int, messages: list[dict], err_str: str):
+    # This must match files_list.prompt format in order to be able to count number of sent files
+    FILES_SECTION_PATTERN = r".*---START_OF_FILES---(.*)---END_OF_FILES---"
+    FILE_PATH_PATTERN = r"^\*\*(.*?)\*\*.*:$"
+
+    sent_files = set()
+    for msg in messages:
+        if not msg.get("content"):
+            continue
+        m = re.match(FILES_SECTION_PATTERN, msg["content"], re.DOTALL)
+        if not m:
+            continue
+        files_section = m.group(1)
+        msg_files = re.findall(FILE_PATH_PATTERN, files_section, re.MULTILINE)
+        sent_files.update(msg_files)
+
+    # Importing here to avoid circular import problem
+    from utils.exit import trace_code_event
+    trace_code_event(
+        "llm-request-token-limit-error",
+        {
+            "n_messages": len(messages),
+            "n_tokens": request_tokens,
+            "files": sorted(sent_files),
+            "error": err_str,
+        }
+    )
 
 
 @retry_on_exception
@@ -384,11 +440,23 @@ def stream_gpt_completion(data, req_type, project):
         timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT),
     )
 
+    if response.status_code == 401 and 'BricksLLM' in response.text:
+        print("", type='keyExpired')
+        msg = "Trial Expired"
+        key = os.getenv("OPENAI_API_KEY")
+        endpoint = os.getenv("OPENAI_ENDPOINT")
+        if key:
+            msg += f"\n\n(using key ending in ...{key[-4:]}):"
+        if endpoint:
+            msg += f"\n(using endpoint: {endpoint}):"
+        msg += f"\n\nError details: {response.text}"
+        raise ApiError(msg, response=response)
+
     if response.status_code != 200:
         project.dot_pilot_gpt.log_chat_completion(endpoint, model, req_type, data['messages'], response.text)
         logger.info(f'problem with request (status {response.status_code}): {response.text}')
         telemetry.record_llm_request(token_count, time.time() - request_start_time, is_error=True)
-        raise ApiError(f"API responded with status code: {response.status_code}. Request token size: {token_count} tokens. Response text: {response.text}")
+        raise ApiError(f"API responded with status code: {response.status_code}. Request token size: {token_count} tokens. Response text: {response.text}", response=response)
 
     # function_calls = {'name': '', 'arguments': ''}
 

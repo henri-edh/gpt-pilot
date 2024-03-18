@@ -3,7 +3,8 @@ import uuid
 import re
 import json
 
-from const.messages import WHEN_USER_DONE, AFFIRMATIVE_ANSWERS, NEGATIVE_ANSWERS
+from const.messages import WHEN_USER_DONE, AFFIRMATIVE_ANSWERS, NEGATIVE_ANSWERS, STUCK_IN_LOOP, NONE_OF_THESE
+from utils.exit import trace_code_event
 from utils.style import (
     color_green,
     color_green_bold,
@@ -14,7 +15,7 @@ from utils.style import (
     color_white_bold
 )
 from helpers.exceptions import TokenLimitError
-from const.code_execution import MAX_COMMAND_DEBUG_TRIES
+from const.code_execution import MAX_COMMAND_DEBUG_TRIES, MAX_QUESTIONS_FOR_BUG_REPORT
 from helpers.exceptions import TooDeepRecursionError
 from helpers.Debugger import Debugger
 from utils.questionary import styled_text
@@ -24,11 +25,13 @@ from logger.logger import logger
 from helpers.Agent import Agent
 from helpers.AgentConvo import AgentConvo
 from utils.utils import should_execute_step, array_of_objects_to_string, generate_app_data
-from helpers.cli import run_command_until_success, execute_command_and_check_cli_response, running_processes
-from const.function_calls import EXECUTE_COMMANDS, GET_TEST_TYPE, IMPLEMENT_TASK, COMMAND_TO_RUN
+from helpers.cli import run_command_until_success, execute_command_and_check_cli_response
+from const.function_calls import (EXECUTE_COMMANDS, GET_TEST_TYPE, IMPLEMENT_TASK, COMMAND_TO_RUN,
+                                  ALTERNATIVE_SOLUTIONS, GET_BUG_REPORT_MISSING_DATA)
 from database.database import save_progress, get_progress_steps, update_app_status
 from utils.telemetry import telemetry
 from prompts.prompts import ask_user
+from utils.print import print_task_progress, print_step_progress
 
 ENVIRONMENT_SETUP_STEP = 'environment_setup'
 
@@ -36,18 +39,19 @@ ENVIRONMENT_SETUP_STEP = 'environment_setup'
 class Developer(Agent):
     def __init__(self, project):
         super().__init__('full_stack_developer', project)
+        self.review_count = 0
         self.run_command = None
         self.save_dev_steps = True
         self.debugger = Debugger(self)
 
-    def start_coding(self):
+    def start_coding(self, task_source):
+        print('Starting development...', type='verbose', category='agent:developer')
         if not self.project.finished:
             self.project.current_step = 'coding'
             update_app_status(self.project.args['app_id'], self.project.current_step)
 
         # DEVELOPMENT
         if not self.project.skip_steps:
-            print(color_green_bold("🚀 Now for the actual development...\n"))
             logger.info("Starting to create the actual code...")
 
         total_tasks = len(self.project.development_plan)
@@ -56,12 +60,14 @@ class Developer(Agent):
 
         for i, dev_task in enumerate(self.project.development_plan):
             # don't create documentation for features
-            if not self.project.finished and not self.project.skip_steps:
+            if not self.project.finished:
                 current_progress_percent = round((i / total_tasks) * 100, 2)
 
                 for threshold in progress_thresholds:
                     if current_progress_percent > threshold and threshold not in documented_thresholds:
-                        self.project.technical_writer.document_project(current_progress_percent)
+                        if not self.project.skip_steps:
+                            self.project.technical_writer.document_project(current_progress_percent)
+                            print('', type='verbose', category='agent:developer')
                         documented_thresholds.add(threshold)
 
             if self.project.tasks_to_load:
@@ -81,7 +87,9 @@ class Developer(Agent):
                         continue
 
             self.project.current_task.start_new_task(dev_task['description'], i + 1)
-            self.implement_task(i, dev_task)
+            print_task_progress(i+1, len(self.project.development_plan), dev_task['description'], task_source, 'in_progress')
+            self.implement_task(i, task_source, dev_task)
+            print_task_progress(i+1, len(self.project.development_plan), dev_task['description'], task_source, 'done')
             telemetry.inc("num_tasks")
 
         # DEVELOPMENT END
@@ -94,20 +102,28 @@ class Developer(Agent):
             update_app_status(self.project.args['app_id'], self.project.current_step)
             message = 'The app is DONE!!! Yay...you can use it now.\n'
             logger.info(message)
-            print(color_green_bold(message))
+            print(color_green_bold(message), category='success')
             if not self.project.skip_steps:
                 telemetry.set("end_result", "success:initial-project")
                 telemetry.send()
         else:
             message = 'Feature complete!\n'
             logger.info(message)
-            print(color_green_bold(message))
+            print(color_green_bold(message), category='success')
             if not self.project.skip_steps:
                 telemetry.set("end_result", "success:feature")
                 telemetry.send()
 
-    def implement_task(self, i, development_task=None):
-        print(color_green_bold(f'Implementing task #{i + 1}: ') + color_green(f' {development_task["description"]}\n'))
+    def implement_task(self, i, task_source, development_task=None):
+        """
+        Implement a single development task.
+
+        :param i: The index of the task in the development plan.
+        :param task_source: The source of the task, one of: 'app', 'feature', 'debugger', 'iteration'.
+        :param development_task: The task to implement.
+        """
+        print(color_green_bold(f'Implementing task #{i + 1}: ') + color_green(f' {development_task["description"]}\n'), category='pythagora')
+        print(f'Starting task #{i + 1} implementation...', type='verbose', category='agent:developer')
         self.project.dot_pilot_gpt.chat_log_folder(i + 1)
 
         convo_dev_task = AgentConvo(self)
@@ -122,7 +138,6 @@ class Developer(Agent):
                 "name": self.project.args['name'],
                 "app_type": self.project.args['app_type'],
                 "app_summary": self.project.project_description,
-                "clarifications": self.project.clarifications,
                 "user_stories": self.project.user_stories,
                 "user_tasks": self.project.user_tasks,
                 "array_of_objects_to_string": array_of_objects_to_string,  # TODO check why is this here
@@ -132,7 +147,9 @@ class Developer(Agent):
                 "files": self.project.get_all_coded_files(),
                 "architecture": self.project.architecture,
                 "technologies": self.project.system_dependencies + self.project.package_dependencies,
-                "task_type": 'feature' if self.project.finished else 'app'
+                "task_type": 'feature' if self.project.finished else 'app',
+                "previous_features": self.project.previous_features,
+                "current_feature": self.project.current_feature,
             })
 
         instructions_prefix = " ".join(instructions.split()[:5])
@@ -142,17 +159,20 @@ class Developer(Agent):
             convo_dev_task.messages = self.project.dev_steps_to_load[0]['messages']
             remove_last_x_messages = 1  # reason why 1 here is because in db we don't store llm_response in 'messages'
             # remove parse_task from the head of dev_steps_to_load; if it's last, record it in checkpoint
-            self.project.cleanup_list('dev_steps_to_load', int(self.project.dev_steps_to_load[0]['id']) + 1)
+            last_parse_task_id = int(self.project.dev_steps_to_load[0]['id'])
+            self.project.cleanup_list('dev_steps_to_load', last_parse_task_id + 1)
         else:
             response = convo_dev_task.send_message('development/parse_task.prompt', {
-                'running_processes': running_processes,
                 'os': platform.system(),
                 'instructions_prefix': instructions_prefix,
                 'instructions_postfix': instructions_postfix,
             }, IMPLEMENT_TASK)
             remove_last_x_messages = 2
+            last_parse_task_id = int(self.project.checkpoints['last_development_step']['id']) if self.project.checkpoints['last_development_step'] is not None else None
 
         steps = response['tasks']
+        self.files_at_start_of_task = self.project.get_files_from_db_by_step_id(last_parse_task_id)
+        self.modified_files = []
         convo_dev_task.remove_last_x_messages(remove_last_x_messages)
 
         completed_steps = []
@@ -197,7 +217,8 @@ class Developer(Agent):
                                        development_task=development_task,
                                        continue_development=True,
                                        is_root_task=True,
-                                       continue_from_step=len(completed_steps))
+                                       continue_from_step=len(completed_steps),
+                                       task_source=task_source)
 
             if result['success']:
                 break
@@ -220,40 +241,31 @@ class Developer(Agent):
                 logger.warning('Testing at end of task failed')
                 break
 
-    def step_code_change(self, convo, task_steps, i, test_after_code_changes):
+    def step_delete_file(self, convo, step, i, test_after_code_changes):
         """
-        :param convo: AgentConvo
-        :param task_steps: list of steps
-        :param i: index of the step that is being implemented
-        :param test_after_code_changes: bool
-        :return: {
-          'success': bool
-          'user_input': string_from_human
-        }
+        Delete a file from the project.
+
+        This doesn't delete the files yet, but measures how often LLM
+        neads to clean up (delete) entire files.
         """
-        step = task_steps[i]
-        if 'code_change_description' in step:
-            print(f'Implementing code changes for `{step["code_change_description"]}`')
-            code_monkey = CodeMonkey(self.project, self)
-            updated_convo = code_monkey.implement_code_changes(convo, step['code_change_description'], step)
-            if test_after_code_changes:
-                return self.test_code_changes(updated_convo, task_steps, i)
-            else:
-                return {"success": True}
-
-        data = step['save_file']
-        if not self.project.skip_steps:
-            delta_lines = len(data.get("content", "").splitlines())
-            telemetry.inc("created_lines", delta_lines)
-
-        self.project.save_file(data)
+        data = step['delete_file']
+        trace_code_event(
+            "delete-file-stub",
+            data,
+        )
         return {"success": True}
 
-    def step_modify_file(self, convo, step, i, test_after_code_changes):
-        data = step['modify_file']
-        print(f'Updating existing file {data["name"]}: {data["code_change_description"].splitlines()[0]}')
-        code_monkey = CodeMonkey(self.project, self)
-        code_monkey.implement_code_changes(convo, data['code_change_description'], data)
+
+    def step_save_file(self, convo, step, i, test_after_code_changes):
+        # Backwards
+        if 'modify_file' in step:
+            step['save_file'] = step.pop('modify_file')
+        elif 'code_change' in step:
+            step['save_file'] = step.pop('code_change')
+
+        data = step['save_file']
+        code_monkey = CodeMonkey(self.project)
+        code_monkey.implement_code_changes(convo, data)
         return {"success": True}
 
     def step_command_run(self, convo, task_steps, i, success_with_cli_response=False):
@@ -348,7 +360,7 @@ class Developer(Agent):
                                                                                 task_steps=task_steps,
                                                                                 step_index=step_index)
             logger.info('After running command llm_response: ' + llm_response)
-            if llm_response == 'NEEDS_DEBUGGING':
+            if llm_response == 'BUG':
                 print(color_red('Got incorrect CLI response:'))
                 print(cli_response)
                 print(color_red('-------------------'))
@@ -379,6 +391,8 @@ class Developer(Agent):
         elif single_match:
             self.run_command = single_match.group(1).strip()
 
+        self.project.run_command = self.run_command
+
     def task_postprocessing(self, convo, development_task, continue_development, task_result, last_branch_name):
         if self.project.last_detailed_user_review_goal is None:
             self.get_run_command(convo)
@@ -393,7 +407,7 @@ class Developer(Agent):
             detailed_user_review_goal = self.project.last_detailed_user_review_goal['llm_response']['text']
 
         try:
-            if continue_development:
+            if continue_development and detailed_user_review_goal and detailed_user_review_goal != "DONE":
                 continue_description = detailed_user_review_goal if detailed_user_review_goal is not None else None
                 return self.continue_development(convo, last_branch_name, continue_description, development_task)
         except TooDeepRecursionError as e:
@@ -404,13 +418,13 @@ class Developer(Agent):
 
     def should_retry_step_implementation(self, step, step_implementation_try):
         if step_implementation_try >= MAX_COMMAND_DEBUG_TRIES:
-            self.dev_help_needed(step)
+            return self.dev_help_needed(step)
 
         print(color_red_bold('\n--------- LLM Reached Token Limit ----------'))
         print(color_red_bold('Can I retry implementing the entire development step?'))
 
         answer = None
-        while answer.lower() not in AFFIRMATIVE_ANSWERS:
+        while answer is None or answer.lower() not in AFFIRMATIVE_ANSWERS:
             print('yes/no', type='buttons-only')
             answer = styled_text(
                 self.project,
@@ -430,10 +444,11 @@ class Developer(Agent):
                     color_red_bold('I tried running the following command but it doesn\'t seem to work:\n\n') +
                     color_white_bold(step['command']['command']) +
                     color_red_bold('\n\nCan you please make it work?'))
-        elif step['type'] == 'code_change':
-            help_description = step['code_change_description']
         elif step['type'] == 'human_intervention':
             help_description = step['human_intervention_description']
+        else:
+            # This should never happen on steps other than command and HI, but just in case
+            help_description = step['type']
 
         # TODO remove this
         def extract_substring(s):
@@ -450,6 +465,7 @@ class Developer(Agent):
         answer = ''
         while answer.lower() != 'continue':
             print(color_red_bold('\n----------------------------- I need your help ------------------------------'))
+            print(color_red('\nHere are instructions for the issue I did not manage to solve:'))
             print(extract_substring(str(help_description)))
             print(color_red_bold('\n-----------------------------------------------------------------------------'))
             print('continue', type='buttons-only')
@@ -463,14 +479,43 @@ class Developer(Agent):
 
     def execute_task(self, convo, task_steps, test_command=None, reset_convo=True,
                      test_after_code_changes=True, continue_development=False,
-                     development_task=None, is_root_task=False, continue_from_step=0):
+                     development_task=None, is_root_task=False, continue_from_step=0, task_source=None):
+        """
+        Execute a list of development steps.
+
+        :param convo: The conversation to use.
+        :param task_steps: The steps to execute.
+        :param test_command: The command to test after the steps are executed.
+        :param reset_convo: True if the conversation should be reset before executing the steps.
+        :param test_after_code_changes: True if the test command should be run after code changes.
+        :param continue_development: If True we reach iteration.
+        :param development_task: The development task to execute.
+        :param is_root_task: True if this is the root task.
+        :param continue_from_step: The index of the step to continue from.
+        :param task_source: The source of the task, one of: 'app', 'feature', 'debugger', 'troubleshooting', 'review'.
+            Task source should never be None.
+
+        :return: The result of the task execution.
+        """
         function_uuid = str(uuid.uuid4())
         convo.save_branch(function_uuid)
+        agent_map = {
+            'app': 'agent:developer',
+            'feature': 'agent:developer',
+            'debugger': 'agent:debugger',
+            'troubleshooting': 'agent:troubleshooter',
+            'review': 'agent:reviewer',
+        }
 
         for (i, step) in enumerate(task_steps):
+            print_step_progress(i+1, len(task_steps), step, task_source)
+            if (step['type'] in ['save_file', 'code_change', 'modify_file'] and
+                    'path' in step[step['type']] and
+                    step[step['type']]['path'] not in self.modified_files):
+                self.modified_files.append(step[step['type']]['path'])
             # This means we are still loading the project and have all the steps until last iteration
             if self.project.last_iteration is not None or self.project.last_detailed_user_review_goal is not None:
-                break
+                continue
 
             # Skip steps before continue_from_step
             if i < continue_from_step:
@@ -495,13 +540,15 @@ class Developer(Agent):
                         # if need_to_see_output and 'cli_response' in result:
                         #     result['user_input'] = result['cli_response']
 
-                    elif step['type'] in ['save_file', 'code_change']:
-                        result = self.step_code_change(convo, task_steps, i, test_after_code_changes)
+                    elif step['type'] in ['save_file', 'modify_file', 'code_change']:
+                        print('', type='verbose', category='agent:code-monkey')
+                        result = self.step_save_file(convo, step, i, test_after_code_changes)
 
-                    elif step['type'] == 'modify_file':
-                        result = self.step_modify_file(convo, step, i, test_after_code_changes)
+                    elif step['type'] == 'delete_file':
+                        result = self.step_delete_file(convo, step, i, test_after_code_changes)
 
                     elif step['type'] == 'human_intervention':
+                        print('', type='verbose', category='human-intervention')
                         result = self.step_human_intervention(convo, task_steps, i)
 
                     # TODO background_command - if we run commands in background we should have way to kill processes
@@ -510,6 +557,7 @@ class Developer(Agent):
                     #     terminate_named_process(step['kill_process'])
                     #     result = {'success': True}
 
+                    print(f'Finishing up {step["type"]} step.', type='verbose', category=agent_map[task_source])
                     logger.info('  step result: %s', result)
 
                     if (not result['success']) or (need_to_see_output and result.get("user_input") != "SKIP"):
@@ -529,6 +577,7 @@ class Developer(Agent):
                         response = self.should_retry_step_implementation(step, step_implementation_try)
                         if 'retry' in response:
                             # TODO we can rewind this convo even more
+                            step_implementation_try += 1
                             convo.load_branch(function_uuid)
                             continue
                         elif 'success' in response:
@@ -543,12 +592,22 @@ class Developer(Agent):
                     else:
                         raise e
 
-        result = {"success": True}  # if all steps are finished, the task has been successfully implemented
+        result = {"success": True}  # if all steps are finished, the task has been successfully implemented... NOT!
         convo.load_branch(function_uuid)
         return self.task_postprocessing(convo, development_task, continue_development, result, function_uuid)
 
     def continue_development(self, iteration_convo, last_branch_name, continue_description='', development_task=None):
+        llm_solutions = self.project.last_iteration['prompt_data']['previous_solutions'] if (self.project.last_iteration and 'previous_solutions' in self.project.last_iteration['prompt_data']) else []
+        alternative_solutions_to_current_issue = self.project.last_iteration['prompt_data']['alternative_solutions_to_current_issue'] if (self.project.last_iteration and 'alternative_solutions_to_current_issue' in self.project.last_iteration['prompt_data']) else []
+        tried_alternative_solutions_to_current_issue = self.project.last_iteration['prompt_data']['tried_alternative_solutions_to_current_issue'] if (self.project.last_iteration and 'tried_alternative_solutions_to_current_issue' in self.project.last_iteration['prompt_data']) else []
+        next_solution_to_try = None
+        iteration_count = self.project.last_iteration['prompt_data']['iteration_count'] if (self.project.last_iteration and 'iteration_count' in self.project.last_iteration['prompt_data']) else 0
         while True:
+            self.user_feedback = llm_solutions[-1]['user_feedback'] if len(llm_solutions) > 0 else None
+            review_successful = self.project.skip_steps or self.review_task()
+            if not review_successful and self.review_count < 3:
+                continue
+            iteration_count += 1
             logger.info('Continue development, last_branch_name: %s', last_branch_name)
             if last_branch_name in iteration_convo.branches.keys():  # if user_feedback is not None we create new convo
                 iteration_convo.load_branch(last_branch_name)
@@ -578,20 +637,47 @@ class Developer(Agent):
                                                                   force=True,
                                                                   return_cli_response=True, is_root_task=True)},
                 convo=iteration_convo,
-                is_root_task=True)
+                is_root_task=True,
+                add_loop_button=iteration_count > 2,
+                category='human-test')
 
             logger.info('response: %s', response)
+            self.review_count = 0
             user_feedback = response['user_input'] if 'user_input' in response else None
             if user_feedback == 'continue':
+                # self.project.remove_debugging_logs_from_all_files()
                 return {"success": True, "user_input": user_feedback}
 
             if user_feedback is not None:
+                print('', type='verbose', category='agent:troubleshooter')
+                self.project.current_task.inc('iterations')
+                stuck_in_loop = user_feedback.startswith(STUCK_IN_LOOP)
+                user_feedback_qa = None
+                if stuck_in_loop:
+                    # Remove the STUCK_IN_LOOP prefix from the user feedback
+                    user_feedback = user_feedback[len(STUCK_IN_LOOP):]
+                    stuck_in_loop = False
+                    if len(alternative_solutions_to_current_issue) > 0:
+                        next_solution_to_try_index = self.ask_user_for_next_solution(alternative_solutions_to_current_issue)
+                        if next_solution_to_try_index == NONE_OF_THESE:
+                            next_solution_to_try = self.get_alternative_solutions(development_task, user_feedback, llm_solutions, tried_alternative_solutions_to_current_issue + alternative_solutions_to_current_issue)
+                        else:
+                            next_solution_to_try = alternative_solutions_to_current_issue.pop(next_solution_to_try_index - 1)
+                    else:
+                        description_of_tried_solutions, alternative_solutions_to_current_issue, next_solution_to_try = self.get_alternative_solutions(development_task, user_feedback, llm_solutions, tried_alternative_solutions_to_current_issue)
+                        if len(tried_alternative_solutions_to_current_issue) == 0:
+                            tried_alternative_solutions_to_current_issue.append(description_of_tried_solutions)
+
+                    tried_alternative_solutions_to_current_issue.append(next_solution_to_try)
+                else:
+                    user_feedback, user_feedback_qa = self.bug_report_generator(user_feedback, user_description)
+
+                print_task_progress(1, 1, development_task['description'], 'troubleshooting', 'in_progress', len(llm_solutions) + 1)
                 iteration_convo = AgentConvo(self)
                 iteration_description = iteration_convo.send_message('development/iteration.prompt', {
                     "name": self.project.args['name'],
                     "app_type": self.project.args['app_type'],
                     "app_summary": self.project.project_description,
-                    "clarifications": self.project.clarifications,
                     "user_stories": self.project.user_stories,
                     "user_tasks": self.project.user_tasks,
                     "architecture": self.project.architecture,
@@ -601,14 +687,26 @@ class Developer(Agent):
                     "current_task": development_task,
                     "development_tasks": self.project.development_plan,
                     "files": self.project.get_all_coded_files(),
-                    "user_input": user_feedback,
+                    "user_feedback": user_feedback,
+                    "user_feedback_qa": user_feedback_qa,
+                    "previous_solutions": llm_solutions[-3:],
+                    "next_solution_to_try": next_solution_to_try,
+                    "alternative_solutions_to_current_issue": alternative_solutions_to_current_issue,
+                    "tried_alternative_solutions_to_current_issue": tried_alternative_solutions_to_current_issue,
+                    "iteration_count": iteration_count,
+                    "previous_features": self.project.previous_features,
+                    "current_feature": self.project.current_feature,
+                })
+
+                llm_solutions.append({
+                    "user_feedback": user_feedback,
+                    "llm_proposal": iteration_description
                 })
 
                 instructions_prefix = " ".join(iteration_description.split()[:5])
                 instructions_postfix = " ".join(iteration_description.split()[-5:])
 
                 llm_response = iteration_convo.send_message('development/parse_task.prompt', {
-                    'running_processes': running_processes,
                     'os': platform.system(),
                     'instructions_prefix': instructions_prefix,
                     'instructions_postfix': instructions_postfix,
@@ -616,7 +714,126 @@ class Developer(Agent):
                 iteration_convo.remove_last_x_messages(2)
 
                 task_steps = llm_response['tasks']
-                self.execute_task(iteration_convo, task_steps, is_root_task=True)
+                self.execute_task(iteration_convo, task_steps, is_root_task=True, task_source='troubleshooting')
+                print_task_progress(1, 1, development_task['description'], 'troubleshooting', 'done', len(llm_solutions) + 1)
+
+    def bug_report_generator(self, user_feedback, task_review_description):
+        """
+        Generate a bug report from the user feedback.
+
+        :param user_feedback: The user feedback.
+        :param task_review_description: The task review description.
+        :return: The user feedback and the questions and answers.
+        """
+        bug_report_convo = AgentConvo(self)
+        function_uuid = str(uuid.uuid4())
+        bug_report_convo.save_branch(function_uuid)
+        questions_and_answers = []
+
+        llm_response = bug_report_convo.send_message('development/bug_report.prompt', {
+            "user_feedback": user_feedback,
+            "app_summary": self.project.project_description,
+            "files": self.project.get_all_coded_files(),
+            "task_review_description": task_review_description,
+            "questions_and_answers": questions_and_answers,
+        }, GET_BUG_REPORT_MISSING_DATA)
+
+        missing_data = llm_response['missing_data']
+        if len(missing_data) == 0:
+            return user_feedback, None
+
+        for missing_data_item in missing_data:
+            if self.project.check_ipc():
+                print(missing_data_item['question'], type='verbose')
+                print('continue/skip question', type='button')
+                if self.run_command:
+                    print(self.run_command, type='run_command')
+
+            answer = ask_user(self.project, missing_data_item['question'], require_some_input=False)
+            if answer.lower() == 'skip question' or answer.lower() == '' or answer.lower() == 'continue':
+                continue
+
+            questions_and_answers.append({
+                "question": missing_data_item['question'],
+                "answer": answer
+            })
+
+        return user_feedback, questions_and_answers
+
+    def review_task(self):
+        """
+        Review all task changes and refactor big files.
+        :return: bool - True if the task changes passed review, False if not
+        """
+        print('Starting review of all changes made in this task...', type='verbose', category='agent:reviewer')
+        self.review_count += 1
+        review_result = self.review_code_changes()
+        refactoring_done = self.refactor_code()
+        if refactoring_done or review_result['implementation_needed']:
+            review_result = self.review_code_changes()
+
+        return review_result['success']
+
+    def review_code_changes(self):
+        """
+        Review the code changes and ask for human intervention if needed
+
+        :return: dict - {
+            'success': bool,
+            'implementation_needed': bool
+        }
+        """
+        review_convo = AgentConvo(self)
+        files = [
+            file_dict for file_dict in self.project.get_all_coded_files()
+            if any(file_dict['full_path'].endswith(modified_file) for modified_file in self.modified_files)
+        ]
+        files_at_start_of_task = [
+            file_dict for file_dict in self.files_at_start_of_task
+            if any(file_dict['full_path'].endswith(modified_file) for modified_file in self.modified_files)
+        ]
+        review = review_convo.send_message('development/review_task.prompt', {
+            "name": self.project.args['name'],
+            "app_summary": self.project.project_description,
+            "tasks": self.project.development_plan,
+            "current_task": self.project.current_task.data.get('task_description'),
+            "files": files,
+            "user_input": self.user_feedback,
+            "modified_files": self.modified_files,
+            "files_at_start_of_task": files_at_start_of_task,
+            "previous_features": self.project.previous_features,
+            "current_feature": self.project.current_feature,
+        })
+
+        instructions_prefix = " ".join(review.split()[:5])
+        instructions_postfix = " ".join(review.split()[-5:])
+
+        if 'DONE' in instructions_postfix:
+            return {
+                'success': True,
+                'implementation_needed': False,
+            }
+
+        llm_response = review_convo.send_message('development/parse_task.prompt', {
+            'os': platform.system(),
+            'instructions_prefix': instructions_prefix,
+            'instructions_postfix': instructions_postfix,
+        }, IMPLEMENT_TASK)
+
+        task_steps = llm_response['tasks']
+        result = self.execute_task(review_convo, task_steps, task_source='review')
+        return {
+            'success': result['success'] if 'success' in result else False,
+            'implementation_needed': True,
+        }
+
+    def refactor_code(self):
+        """
+        Refactor the code if needed
+        :return: bool - True if the code refactoring was done
+        """
+        # todo refactor code
+        return False
 
     def set_up_environment(self):
         self.project.current_step = ENVIRONMENT_SETUP_STEP
@@ -638,7 +855,13 @@ class Developer(Agent):
                 dep_text = dependency['name']
 
             logger.info('Checking %s', dependency)
-            llm_response = self.check_system_dependency(dependency)
+            try:
+                llm_response = self.check_system_dependency(dependency)
+            except Exception as err:
+                # This catches weird errors like people removing or renaming the workspace
+                # folder while we're trying to run system commands. Since these commands don't
+                # care about folders they run in, we don't want to crash just because of that.
+                llm_response = str(err)
 
             if llm_response == 'DONE':
                 print(color_green_bold(f"✅ {dep_text} is available."))
@@ -737,3 +960,49 @@ class Developer(Agent):
         #     code_changes_details = get_step_code_changes()
         #     # TODO: give to code monkey for implementation
         pass
+
+    def get_alternative_solutions(self, development_task, user_feedback, previous_solutions, tried_alternative_solutions_to_current_issue):
+        convo = AgentConvo(self)
+        response = convo.send_message('development/get_alternative_solutions.prompt', {
+            "name": self.project.args['name'],
+            "app_type": self.project.args['app_type'],
+            "app_summary": self.project.project_description,
+            "architecture": self.project.architecture,
+            "technologies": self.project.system_dependencies + self.project.package_dependencies,
+            "directory_tree": self.project.get_directory_tree(True),
+            "current_task": development_task,
+            "development_tasks": self.project.development_plan,
+            "files": self.project.get_all_coded_files(),
+            "user_input": user_feedback,
+            "previous_solutions": previous_solutions,
+            "tried_alternative_solutions_to_current_issue": tried_alternative_solutions_to_current_issue,
+            "previous_features": self.project.previous_features,
+            "current_feature": self.project.current_feature,
+        }, ALTERNATIVE_SOLUTIONS)
+
+        next_solution_to_try_index = self.ask_user_for_next_solution(response['alternative_solutions'])
+        if isinstance(next_solution_to_try_index, str) and next_solution_to_try_index == NONE_OF_THESE:
+            return self.get_alternative_solutions(development_task, user_feedback, previous_solutions, tried_alternative_solutions_to_current_issue + response['alternative_solutions'])
+
+        next_solution_to_try = response['alternative_solutions'].pop(next_solution_to_try_index - 1)
+
+        return response['description_of_tried_solutions'], response['alternative_solutions'], next_solution_to_try
+
+    def ask_user_for_next_solution(self, alternative_solutions):
+        solutions_indices_as_strings = [str(i + 1) for i in range(len(alternative_solutions))]
+        string_for_buttons = '/'.join(solutions_indices_as_strings) + '/' + (NONE_OF_THESE[0].upper() + NONE_OF_THESE[1:])
+
+        description_of_solutions = '\n\n'.join([f"{index + 1}: {sol}" for index, sol in enumerate(alternative_solutions)])
+        print(string_for_buttons, type='button')
+        next_solution_to_try_index = ask_user(self.project, 'Choose which solution would you like GPT Pilot to try next?',
+                                              require_some_input=False,
+                                              hint=description_of_solutions)
+
+        if next_solution_to_try_index in solutions_indices_as_strings:
+            next_solution_to_try_index = int(next_solution_to_try_index)
+        elif next_solution_to_try_index.lower() == NONE_OF_THESE:
+            next_solution_to_try_index = NONE_OF_THESE
+        else:
+            next_solution_to_try_index = 1
+
+        return next_solution_to_try_index

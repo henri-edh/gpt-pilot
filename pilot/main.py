@@ -9,7 +9,18 @@ import traceback
 try:
     from dotenv import load_dotenv
 except ImportError:
-    raise RuntimeError('Python environment for GPT Pilot is not completely set up: required package "python-dotenv" is missing.') from None
+    gpt_pilot_root = os.path.dirname(os.path.dirname(__file__))
+    venv_path = os.path.join(gpt_pilot_root, 'pilot-env')
+    requirements_path = os.path.join(gpt_pilot_root, 'requirements.txt')
+    if sys.prefix == sys.base_prefix:
+        venv_python_path = os.path.join(venv_path, 'scripts' if sys.platform == 'win32' else 'bin', 'python')
+        print('Python environment for GPT Pilot is not set up.')
+        print(f'Please create Python virtual environment: {sys.executable} -m venv {venv_path}')
+        print(f'Then install the required dependencies with: {venv_python_path} -m pip install -r {requirements_path}')
+    else:
+        print('Python environment for GPT Pilot is not completely set up.')
+        print(f'Please run `{sys.executable} -m pip install -r {requirements_path}` to finish Python setup, and rerun GPT Pilot.')
+    sys.exit(-1)
 
 load_dotenv()
 
@@ -21,7 +32,7 @@ from utils.exit import exit_gpt_pilot
 from logger.logger import logger
 from database.database import database_exists, create_database, tables_exist, create_tables, get_created_apps_with_steps
 
-from utils.settings import settings, loader
+from utils.settings import settings, loader, get_version
 from utils.telemetry import telemetry
 from helpers.exceptions import ApiError, TokenLimitError, GracefulExit
 
@@ -71,6 +82,10 @@ if __name__ == "__main__":
                                 f"{'' if len(app['development_steps']) == 0 else app['development_steps'][-1]['id']:3}"
                                 f"  {app['name']}" for app in get_created_apps_with_steps()))
 
+        elif '--version' in args:
+            print(get_version())
+            run_exit_fn = False
+
         elif '--ux-test' in args:
             from test.ux_tests import run_test
             run_test(args['--ux-test'], args)
@@ -97,6 +112,7 @@ if __name__ == "__main__":
             started = project.start()
             if started:
                 project.finish()
+                print('Thank you for using Pythagora!', type='ipc', category='pythagora')
                 telemetry.set("end_result", "success:exit")
             else:
                 run_exit_fn = False
@@ -107,6 +123,14 @@ if __name__ == "__main__":
         telemetry.record_crash(err, end_result="failure:api-error")
         telemetry.send()
         run_exit_fn = False
+        if isinstance(err, TokenLimitError):
+            print('', type='verbose', category='error')
+            print(color_red(
+                "We sent too large request to the LLM, resulting in an error. "
+                "This is usually caused by including framework files in an LLM request. "
+                "Here's how you can get GPT Pilot to ignore those extra files: "
+                "https://bit.ly/faq-token-limit-error"
+            ))
         print('Exit', type='exit')
 
     except KeyboardInterrupt:
@@ -122,6 +146,7 @@ if __name__ == "__main__":
         print('Exit', type='exit')
 
     except Exception as err:
+        print('', type='verbose', category='error')
         print(color_red('---------- GPT PILOT EXITING WITH ERROR ----------'))
         traceback.print_exc()
         print(color_red('--------------------------------------------------'))
@@ -130,6 +155,8 @@ if __name__ == "__main__":
 
     finally:
         if project is not None:
+            if project.check_ipc():
+                ask_feedback = False
             project.current_task.exit()
             project.finish_loading(do_cleanup=False)
         if run_exit_fn:

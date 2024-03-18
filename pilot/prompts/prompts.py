@@ -55,7 +55,7 @@ def ask_for_main_app_definition(project):
 def ask_user(project, question: str, require_some_input=True, hint: str = None, ignore_user_input_count: bool = False):
     while True:
         if hint is not None:
-            print(color_white_bold(hint) + '\n', type='hint')
+            print(color_white_bold(hint) + '\n')
         project.finish_loading()
         answer = styled_text(project, question, hint=hint, ignore_user_input_count=ignore_user_input_count)
 
@@ -71,47 +71,6 @@ def ask_user(project, question: str, require_some_input=True, hint: str = None, 
             continue
         else:
             return answer
-
-
-def get_additional_info_from_openai(project, messages):
-    """
-    Runs the conversation between Product Owner and LLM.
-    Provides the user's initial description, LLM asks the user clarifying questions and user responds.
-    Limited by `MAX_QUESTIONS`, exits when LLM responds "EVERYTHING_CLEAR".
-
-    :param project: Project
-    :param messages: [
-        { "role": "system", "content": "You are a Product Owner..." },
-        { "role": "user", "content": "I want you to create the app {name} that can be described: ```{description}```..." }
-      ]
-    :return: The updated `messages` list with the entire conversation between user and LLM.
-    """
-    is_complete = False
-    while not is_complete:
-        # Obtain clarifications using the OpenAI API
-        # { 'text': new_code }
-        try:
-            response = create_gpt_chat_completion(messages, 'additional_info', project)
-        except ApiError:
-            response = None
-
-        if response is not None:
-            if response['text'] and response['text'].strip() == END_RESPONSE:
-                # print(response['text'] + '\n')
-                break
-
-            # Ask the question to the user
-            answer = ask_user(project, response['text'])
-
-            # Add the answer to the messages
-            messages.append({'role': 'assistant', 'content': response['text']})
-            messages.append({'role': 'user', 'content': answer})
-        else:
-            is_complete = True
-
-    logger.info('Getting additional info from openai done')
-
-    return [msg for msg in messages if msg['role'] != 'system']
 
 
 # TODO refactor this to comply with AgentConvo class
